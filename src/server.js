@@ -1,9 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
+const path = require('path');
+const fs = require('fs');
 const HDHomeRunDiscovery = require('./discovery');
 const HDHomeRunDVR = require('./dvr');
 const HDHomeRunDatabase = require('./database');
+const HLSStreamManager = require('./hls-stream');
 
 class HDHomeRunServer {
   constructor(options = {}) {
@@ -11,9 +14,10 @@ class HDHomeRunServer {
     this.port = options.port || 3000;
     this.verbose = options.verbose || false;
     this.database = new HDHomeRunDatabase();
+    this.hlsManager = new HLSStreamManager({ verbose: this.verbose });
     this.isDiscovering = false;
     this.lastDiscovery = null;
-    
+
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -28,6 +32,17 @@ class HDHomeRunServer {
       const timestamp = new Date().toISOString();
       console.log(`[${timestamp}] [DEBUG] ${message}`);
     }
+  }
+
+  formatEpisodeWithHLS(episode, req) {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const hlsUrl = `${baseUrl}/api/stream/${episode.id}/playlist.m3u8`;
+
+    return {
+      ...episode,
+      source_url: episode.play_url,  // Keep original HDHomeRun URL
+      play_url: hlsUrl                // Replace with HLS proxy URL
+    };
   }
 
   setupMiddleware() {
@@ -166,14 +181,17 @@ class HDHomeRunServer {
         }
 
         // Format episode data
-        const formattedEpisodes = episodes.map(e => ({
-          ...e,
-          start_time: new Date(e.start_time * 1000).toISOString(),
-          end_time: new Date(e.end_time * 1000).toISOString(),
-          original_airdate: e.original_airdate ? new Date(e.original_airdate * 1000).toISOString() : null,
-          duration_minutes: Math.round((e.duration || 0) / 60),
-          resume_minutes: Math.round((e.resume_position || 0) / 60)
-        }));
+        const formattedEpisodes = episodes.map(e => {
+          const episode = this.formatEpisodeWithHLS(e, req);
+          return {
+            ...episode,
+            start_time: new Date(e.start_time * 1000).toISOString(),
+            end_time: new Date(e.end_time * 1000).toISOString(),
+            original_airdate: e.original_airdate ? new Date(e.original_airdate * 1000).toISOString() : null,
+            duration_minutes: Math.round((e.duration || 0) / 60),
+            resume_minutes: Math.round((e.resume_position || 0) / 60)
+          };
+        });
 
         res.json({
           episodes: formattedEpisodes,
@@ -197,13 +215,16 @@ class HDHomeRunServer {
         const { limit = 20 } = req.query;
         const episodes = await this.database.getRecentEpisodes(parseInt(limit));
 
-        const formattedEpisodes = episodes.map(e => ({
-          ...e,
-          start_time: new Date(e.start_time * 1000).toISOString(),
-          end_time: new Date(e.end_time * 1000).toISOString(),
-          duration_minutes: Math.round((e.duration || 0) / 60),
-          resume_minutes: Math.round((e.resume_position || 0) / 60)
-        }));
+        const formattedEpisodes = episodes.map(e => {
+          const episode = this.formatEpisodeWithHLS(e, req);
+          return {
+            ...episode,
+            start_time: new Date(e.start_time * 1000).toISOString(),
+            end_time: new Date(e.end_time * 1000).toISOString(),
+            duration_minutes: Math.round((e.duration || 0) / 60),
+            resume_minutes: Math.round((e.resume_position || 0) / 60)
+          };
+        });
 
         res.json({
           episodes: formattedEpisodes,
@@ -219,9 +240,9 @@ class HDHomeRunServer {
     // Manual discovery trigger
     this.app.post('/api/discover', async (req, res) => {
       if (this.isDiscovering) {
-        return res.status(429).json({ 
-          error: 'Discovery already in progress', 
-          isDiscovering: true 
+        return res.status(429).json({
+          error: 'Discovery already in progress',
+          isDiscovering: true
         });
       }
 
@@ -231,8 +252,8 @@ class HDHomeRunServer {
           this.log(`Background discovery failed: ${error.message}`);
         });
 
-        res.json({ 
-          message: 'Discovery started', 
+        res.json({
+          message: 'Discovery started',
           isDiscovering: true,
           timestamp: new Date().toISOString()
         });
@@ -242,19 +263,143 @@ class HDHomeRunServer {
       }
     });
 
+    // HLS Streaming endpoints
+
+    // Get HLS playlist for an episode
+    this.app.get('/api/stream/:episodeId/playlist.m3u8', async (req, res) => {
+      try {
+        const { episodeId } = req.params;
+
+        // Get episode from database
+        const episode = await this.database.getEpisodeById(episodeId);
+
+        if (!episode) {
+          return res.status(404).json({ error: 'Episode not found' });
+        }
+
+        if (!episode.source_url && !episode.play_url) {
+          return res.status(400).json({ error: 'Episode has no playback URL' });
+        }
+
+        // Use source_url (original HDHomeRun URL) for transcoding
+        const sourceUrl = episode.source_url || episode.play_url;
+
+        this.debug(`HLS playlist requested for episode ${episodeId}: ${episode.title}`);
+
+        // Start transcoding (or reuse existing transcode)
+        const outputDir = await this.hlsManager.startTranscode(episodeId, sourceUrl);
+        const playlistPath = path.join(outputDir, 'stream.m3u8');
+
+        // Read and serve the playlist
+        const playlist = fs.readFileSync(playlistPath, 'utf8');
+
+        res.set({
+          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Cache-Control': 'no-cache',
+          'Access-Control-Allow-Origin': '*'
+        });
+
+        res.send(playlist);
+      } catch (error) {
+        this.log(`Error serving HLS playlist: ${error.message}`);
+        res.status(500).json({ error: 'Failed to generate HLS stream', details: error.message });
+      }
+    });
+
+    // Serve HLS segments
+    this.app.get('/api/stream/:episodeId/:filename', async (req, res) => {
+      try {
+        const { episodeId, filename } = req.params;
+
+        // Validate filename to prevent directory traversal
+        if (filename.includes('..') || filename.includes('/')) {
+          return res.status(400).json({ error: 'Invalid filename' });
+        }
+
+        const streamDir = this.hlsManager.getStreamDir(episodeId);
+        const filePath = path.join(streamDir, filename);
+
+        // Check if file exists - wait a bit if transcode is in progress
+        const status = this.hlsManager.getTranscodeStatus(episodeId);
+
+        if (status.state === 'transcoding') {
+          // Transcode in progress - wait briefly for segment to appear
+          let attempts = 0;
+          while (attempts < 10) {
+            if (fs.existsSync(filePath)) {
+              break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 500));
+            attempts++;
+          }
+        }
+
+        // Check if file exists
+        if (!fs.existsSync(filePath)) {
+          return res.status(404).json({
+            error: 'Segment not found',
+            transcodeState: status.state
+          });
+        }
+
+        this.debug(`Serving segment: ${filename} for episode ${episodeId}`);
+
+        // Serve the file
+        res.set({
+          'Content-Type': filename.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
+          'Cache-Control': 'public, max-age=86400', // Cache for 24 hours
+          'Access-Control-Allow-Origin': '*'
+        });
+
+        const stream = fs.createReadStream(filePath);
+        stream.pipe(res);
+
+        stream.on('error', (error) => {
+          this.log(`Error streaming segment ${filename}: ${error.message}`);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Failed to stream segment' });
+          }
+        });
+      } catch (error) {
+        this.log(`Error serving HLS segment: ${error.message}`);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to serve segment' });
+        }
+      }
+    });
+
+    // Get transcode status for an episode
+    this.app.get('/api/stream/:episodeId/status', async (req, res) => {
+      try {
+        const { episodeId } = req.params;
+        const status = this.hlsManager.getTranscodeStatus(episodeId);
+
+        res.json({
+          episodeId,
+          ...status
+        });
+      } catch (error) {
+        this.log(`Error getting transcode status: ${error.message}`);
+        res.status(500).json({ error: 'Failed to get transcode status' });
+      }
+    });
+
     // 404 handler
     this.app.use('*', (req, res) => {
-      res.status(404).json({ 
+      res.status(404).json({
         error: 'Endpoint not found',
         path: req.path,
         availableEndpoints: [
           'GET /health',
-          'GET /api/info', 
+          'GET /api/info',
           'GET /api/shows',
           'GET /api/shows/:id',
           'GET /api/shows/:id/episodes',
           'GET /api/episodes/recent',
-          'POST /api/discover'
+          'POST /api/discover',
+          'GET /api/stream/:episodeId/playlist.m3u8',
+          'GET /api/stream/:episodeId/:filename',
+          'GET /api/stream/:episodeId/status'
         ]
       });
     });
@@ -344,14 +489,18 @@ class HDHomeRunServer {
       // Initialize database
       this.log('Initializing database...');
       await this.database.initialize();
-      
+
+      // Initialize HLS stream manager
+      this.log('Initializing HLS stream manager...');
+      await this.hlsManager.initialize();
+
       // Run initial discovery
       this.log('Running initial discovery...');
       await this.runDiscovery();
-      
+
       // Setup scheduled discovery
       this.setupScheduler();
-      
+
       // Start server
       this.app.listen(this.port, () => {
         this.log(`HDHomeRun DVR API server running on port ${this.port}`);
@@ -363,6 +512,8 @@ class HDHomeRunServer {
         this.log('  GET /api/shows/:id/episodes - Episodes for a show');
         this.log('  GET /api/episodes/recent - Recent episodes');
         this.log('  POST /api/discover - Manual discovery trigger');
+        this.log('  GET /api/stream/:episodeId/playlist.m3u8 - HLS stream');
+        this.log('  GET /api/stream/:episodeId/status - Transcode status');
       });
     } catch (error) {
       this.log(`Failed to start server: ${error.message}`);
@@ -372,6 +523,7 @@ class HDHomeRunServer {
 
   async stop() {
     this.log('Shutting down server...');
+    await this.hlsManager.shutdown();
     await this.database.close();
   }
 }

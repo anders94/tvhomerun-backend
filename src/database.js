@@ -558,9 +558,55 @@ class HDHomeRunDatabase {
     return episodes || [];
   }
 
+  async getEpisodeById(episodeId) {
+    const episodes = await db.run(`
+      SELECT
+        e.id,
+        e.program_id,
+        e.title,
+        e.episode_title,
+        e.episode_number,
+        e.season_number,
+        e.episode_num,
+        e.synopsis,
+        e.category,
+        e.channel_name,
+        e.channel_number,
+        e.channel_image_url,
+        e.start_time,
+        e.end_time,
+        e.duration,
+        e.original_airdate,
+        e.filename,
+        e.file_size,
+        e.play_url,
+        e.cmd_url,
+        e.resume_position,
+        e.watched,
+        e.record_success,
+        e.image_url,
+        e.created_at,
+        e.updated_at,
+        s.id as series_id,
+        s.series_id as series_series_id,
+        s.title as series_title,
+        s.image_url as series_image,
+        d.id as device_id,
+        d.device_id as device_device_id,
+        d.friendly_name as device_name,
+        d.ip_address as device_ip
+      FROM episodes e
+      JOIN series s ON e.series_id = s.id
+      JOIN devices d ON s.device_id = d.id
+      WHERE e.id = ? OR e.program_id = ?
+    `, [episodeId, episodeId]);
+
+    return episodes && episodes.length > 0 ? episodes[0] : null;
+  }
+
   async getRecentEpisodes(limit = 50) {
     const episodes = await db.run(`
-      SELECT 
+      SELECT
         e.id,
         e.program_id,
         e.title,
@@ -588,7 +634,7 @@ class HDHomeRunDatabase {
       ORDER BY e.created_at DESC
       LIMIT ?
     `, [limit]);
-    
+
     return episodes || [];
   }
 
