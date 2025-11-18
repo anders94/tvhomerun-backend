@@ -1,5 +1,5 @@
 {
-  "name": "tvhomerun-api",
+  "name": "tvhomerun-web",
   "version": "1.0.0",
   "description": "API server for HDHomeRun devices with periodic discovery and DVR content management",
   "main": "src/server.js",
