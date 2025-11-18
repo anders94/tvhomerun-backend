@@ -25,9 +25,13 @@ class HLSStreamManager {
     this.cacheDir = options.cacheDir || path.join(__dirname, '../hls-cache');
     this.cleanupInterval = options.cleanupInterval || 3600000; // 1 hour
     this.maxCacheAge = options.maxCacheAge || 2592000000; // 30 days
+    this.maxConcurrentTranscodes = options.maxConcurrentTranscodes || 2; // Max concurrent transcodes
 
     // Transcoding jobs: episodeId -> { state, process, startTime, progress, error }
     this.transcodeJobs = new Map();
+
+    // Track active transcodes in order (oldest first) for LRU eviction
+    this.activeTranscodes = [];
 
     // Load existing cache state on startup
     this.loadCacheState();
@@ -162,6 +166,13 @@ class HLSStreamManager {
 
     const outputDir = this.getStreamDir(episodeId);
 
+    // Check concurrent transcode limit and evict oldest if needed
+    const activeCount = this.activeTranscodes.length;
+    if (activeCount >= this.maxConcurrentTranscodes) {
+      this.log(`Concurrent transcode limit reached (${activeCount}/${this.maxConcurrentTranscodes}), evicting oldest`);
+      await this.evictOldestTranscode();
+    }
+
     // Create output directory
     await mkdir(outputDir, { recursive: true });
 
@@ -210,6 +221,10 @@ class HLSStreamManager {
 
     this.transcodeJobs.set(episodeId, job);
 
+    // Add to active transcodes queue
+    this.activeTranscodes.push(episodeId);
+    this.debug(`Added episode ${episodeId} to active queue (${this.activeTranscodes.length} active)`);
+
     // Save initial state
     await this.saveTranscodeState(episodeId, {
       state: TRANSCODE_STATE.TRANSCODING,
@@ -238,6 +253,13 @@ class HLSStreamManager {
       job.state = TRANSCODE_STATE.ERROR;
       job.error = error.message;
 
+      // Remove from active transcodes queue
+      const index = this.activeTranscodes.indexOf(episodeId);
+      if (index !== -1) {
+        this.activeTranscodes.splice(index, 1);
+        this.debug(`Removed episode ${episodeId} from active queue due to error (${this.activeTranscodes.length} active)`);
+      }
+
       this.saveTranscodeState(episodeId, {
         state: TRANSCODE_STATE.ERROR,
         startTime: job.startTime,
@@ -247,6 +269,13 @@ class HLSStreamManager {
     });
 
     ffmpeg.on('close', (code) => {
+      // Remove from active transcodes queue
+      const index = this.activeTranscodes.indexOf(episodeId);
+      if (index !== -1) {
+        this.activeTranscodes.splice(index, 1);
+        this.debug(`Removed episode ${episodeId} from active queue (${this.activeTranscodes.length} active)`);
+      }
+
       if (code === 0) {
         this.log(`Transcode completed successfully for episode ${episodeId}`);
         job.state = TRANSCODE_STATE.COMPLETE;
@@ -363,9 +392,29 @@ class HLSStreamManager {
     // Remove from jobs map
     this.transcodeJobs.delete(episodeId);
 
+    // Remove from active transcodes queue
+    const index = this.activeTranscodes.indexOf(episodeId);
+    if (index !== -1) {
+      this.activeTranscodes.splice(index, 1);
+    }
+
     // Clean up files
     const outputDir = this.getStreamDir(episodeId);
     await this.cleanupStreamDir(outputDir);
+  }
+
+  /**
+   * Evict the oldest active transcode to make room for a new one
+   */
+  async evictOldestTranscode() {
+    if (this.activeTranscodes.length === 0) {
+      return;
+    }
+
+    const oldestEpisodeId = this.activeTranscodes[0];
+    this.log(`Evicting oldest transcode (episode ${oldestEpisodeId}) to make room for new transcode`);
+
+    await this.deleteTranscode(oldestEpisodeId);
   }
 
   /**
