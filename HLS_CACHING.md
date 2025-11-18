@@ -116,8 +116,8 @@ Settings in `src/hls-stream.js`:
 ```
 
 **Content Length Limits:**
-- 3-digit naming (`%03d`): 1,000 segments = 66 minutes max ❌
-- 4-digit naming (`%04d`): 10,000 segments = 11.1 hours max ✅
+- 3-digit naming (`%03d`): 1,000 segments = 66 minutes max
+- 4-digit naming (`%04d`): 10,000 segments = 11.1 hours max
 
 ## Cache Management
 
