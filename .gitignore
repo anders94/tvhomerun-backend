@@ -4,3 +4,6 @@
 tvhdhomerun.db
 node_modules/
 hls-cache/
+log/
+run
+supervise/

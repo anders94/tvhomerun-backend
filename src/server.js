@@ -12,6 +12,7 @@ const HLSStreamManager = require('./hls-stream');
 class HDHomeRunServer {
   constructor(options = {}) {
     this.app = express();
+    this.host = options.host || '127.0.0.1';
     this.port = options.port || 3000;
     this.verbose = options.verbose || false;
     this.database = new HDHomeRunDatabase();
@@ -620,8 +621,8 @@ class HDHomeRunServer {
       this.setupScheduler();
 
       // Start server
-      this.app.listen(this.port, () => {
-        this.log(`HDHomeRun DVR API server running on port ${this.port}`);
+	this.app.listen(this.port, this.host, () => {
+        this.log(`HDHomeRun DVR API server running on http://${this.host}:${this.port}`);
         this.log('Available endpoints:');
         this.log('  GET /health - Health check');
         this.log('  GET /api/info - API statistics');
@@ -651,9 +652,10 @@ class HDHomeRunServer {
 // Handle startup
 if (require.main === module) {
   const verbose = process.argv.includes('--verbose') || process.argv.includes('-v');
+  const host = process.env.HOST || '127.0.0.1';
   const port = process.env.PORT || 3000;
   
-  const server = new HDHomeRunServer({ port, verbose });
+  const server = new HDHomeRunServer({ host, port, verbose });
   
   // Handle graceful shutdown
   process.on('SIGTERM', async () => {

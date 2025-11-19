@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:info.hdhomerun.com)",
+      "Bash(npm install)",
+      "WebFetch(domain:github.com)",
+      "Bash(npm run debug:*)",
+      "Bash(node:*)",
+      "Bash(npm start)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(ffprobe:*)",
+      "Bash(sqlite3:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill -9)",
+      "Bash(curl:*)",
+      "Bash(cat:*)",
+      "Bash(chmod:*)",
+      "Bash(/tmp/test_hls.sh)",
+      "Bash(python3:*)"
+    ],
+    "deny": []
+  }
+}
