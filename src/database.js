@@ -660,7 +660,7 @@ class HDHomeRunDatabase {
 
   async getApiStats() {
     const stats = await db.run(`
-      SELECT 
+      SELECT
         COUNT(DISTINCT d.id) as device_count,
         COUNT(DISTINCT s.id) as series_count,
         COUNT(e.id) as episode_count,
@@ -682,6 +682,23 @@ class HDHomeRunDatabase {
     }
 
     return { devices: 0, series: 0, episodes: 0, totalDurationHours: 0, lastUpdated: null };
+  }
+
+  async updateEpisodeProgress(episodeId, position, watched) {
+    const now = new Date().toISOString();
+
+    // Update the episode's progress
+    await db.run(`
+      UPDATE episodes
+      SET
+        resume_position = ?,
+        watched = ?,
+        updated_at = ?
+      WHERE id = ?
+    `, [position, watched ? 1 : 0, now, episodeId]);
+
+    // Return the updated episode
+    return await this.getEpisodeById(episodeId);
   }
 
   async close() {

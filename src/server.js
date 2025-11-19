@@ -3,6 +3,7 @@ const cors = require('cors');
 const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
 const HDHomeRunDiscovery = require('./discovery');
 const HDHomeRunDVR = require('./dvr');
 const HDHomeRunDatabase = require('./database');
@@ -43,6 +44,35 @@ class HDHomeRunServer {
       source_url: episode.play_url,  // Keep original HDHomeRun URL
       play_url: hlsUrl                // Replace with HLS proxy URL
     };
+  }
+
+  async relayProgressToHDHomeRun(cmdUrl, position, watched) {
+    // Attempt to relay progress to HDHomeRun's CmdURL endpoint
+    // This is experimental as the resume/progress API is not officially documented
+
+    try {
+      this.debug(`Attempting to relay progress to HDHomeRun: ${cmdUrl}`);
+
+      // Try sending progress as form data (common for POST endpoints)
+      const formData = new URLSearchParams();
+      formData.append('position', position.toString());
+      formData.append('watched', watched ? '1' : '0');
+      formData.append('resume', position.toString());
+
+      const response = await axios.post(cmdUrl, formData, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        timeout: 5000
+      });
+
+      this.debug(`HDHomeRun progress relay response: ${response.status}`);
+      return response.data;
+    } catch (error) {
+      // Don't throw - this is best-effort since API isn't documented
+      this.debug(`HDHomeRun progress relay failed (expected): ${error.message}`);
+      return null;
+    }
   }
 
   setupMiddleware() {
@@ -237,6 +267,92 @@ class HDHomeRunServer {
       }
     });
 
+    // Get specific episode by ID
+    this.app.get('/api/episodes/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const episode = await this.database.getEpisodeById(id);
+
+        if (!episode) {
+          return res.status(404).json({ error: 'Episode not found' });
+        }
+
+        const formattedEpisode = this.formatEpisodeWithHLS(episode, req);
+
+        res.json({
+          episode: {
+            ...formattedEpisode,
+            start_time: new Date(episode.start_time * 1000).toISOString(),
+            end_time: new Date(episode.end_time * 1000).toISOString(),
+            original_airdate: episode.original_airdate ? new Date(episode.original_airdate * 1000).toISOString() : null,
+            duration_minutes: Math.round((episode.duration || 0) / 60),
+            resume_minutes: Math.round((episode.resume_position || 0) / 60)
+          }
+        });
+      } catch (error) {
+        this.log(`Error getting episode ${req.params.id}: ${error.message}`);
+        res.status(500).json({ error: 'Failed to retrieve episode' });
+      }
+    });
+
+    // Update episode playback progress
+    this.app.put('/api/episodes/:id/progress', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { position, watched } = req.body;
+
+        // Validate input
+        if (position === undefined || watched === undefined) {
+          return res.status(400).json({
+            error: 'Missing required fields',
+            required: { position: 'number (seconds)', watched: 'boolean (0 or 1)' }
+          });
+        }
+
+        if (typeof position !== 'number' || position < 0) {
+          return res.status(400).json({
+            error: 'Invalid position',
+            message: 'Position must be a non-negative number in seconds'
+          });
+        }
+
+        // Get episode to check if it exists and get CmdURL
+        const episode = await this.database.getEpisodeById(id);
+        if (!episode) {
+          return res.status(404).json({ error: 'Episode not found' });
+        }
+
+        // Update progress in local database
+        const updatedEpisode = await this.database.updateEpisodeProgress(id, position, watched);
+
+        this.debug(`Updated progress for episode ${id}: position=${position}s, watched=${watched}`);
+
+        // Attempt to relay progress to HDHomeRun (experimental)
+        // Note: This may not work as the API isn't officially documented
+        if (episode.cmd_url) {
+          this.relayProgressToHDHomeRun(episode.cmd_url, position, watched).catch(error => {
+            this.debug(`Failed to relay progress to HDHomeRun: ${error.message}`);
+          });
+        }
+
+        const formattedEpisode = this.formatEpisodeWithHLS(updatedEpisode, req);
+
+        res.json({
+          success: true,
+          episode: {
+            ...formattedEpisode,
+            start_time: new Date(updatedEpisode.start_time * 1000).toISOString(),
+            end_time: new Date(updatedEpisode.end_time * 1000).toISOString(),
+            duration_minutes: Math.round((updatedEpisode.duration || 0) / 60),
+            resume_minutes: Math.round((updatedEpisode.resume_position || 0) / 60)
+          }
+        });
+      } catch (error) {
+        this.log(`Error updating progress for episode ${req.params.id}: ${error.message}`);
+        res.status(500).json({ error: 'Failed to update progress' });
+      }
+    });
+
     // Manual discovery trigger
     this.app.post('/api/discover', async (req, res) => {
       if (this.isDiscovering) {
@@ -396,6 +512,8 @@ class HDHomeRunServer {
           'GET /api/shows/:id',
           'GET /api/shows/:id/episodes',
           'GET /api/episodes/recent',
+          'GET /api/episodes/:id',
+          'PUT /api/episodes/:id/progress',
           'POST /api/discover',
           'GET /api/stream/:episodeId/playlist.m3u8',
           'GET /api/stream/:episodeId/:filename',
@@ -511,6 +629,8 @@ class HDHomeRunServer {
         this.log('  GET /api/shows/:id - Specific show');
         this.log('  GET /api/shows/:id/episodes - Episodes for a show');
         this.log('  GET /api/episodes/recent - Recent episodes');
+        this.log('  GET /api/episodes/:id - Get specific episode');
+        this.log('  PUT /api/episodes/:id/progress - Update watch progress');
         this.log('  POST /api/discover - Manual discovery trigger');
         this.log('  GET /api/stream/:episodeId/playlist.m3u8 - HLS stream');
         this.log('  GET /api/stream/:episodeId/status - Transcode status');
