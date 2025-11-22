@@ -1,6 +1,6 @@
 # Watch Progress API
 
-This document describes the watch progress tracking functionality added to the tvhomerun-web API.
+This document describes the watch progress tracking functionality added to the tvhomerun-backend API.
 
 ## Overview
 
