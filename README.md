@@ -1,6 +1,6 @@
 # TVHomeRun Web
 
-A Node.js API server for HDHomeRun devices that automatically discovers devices on your network and provides REST endpoints for accessing DVR content. The server runs periodic discovery and maintains a local SQLite database of all devices, shows, and episodes.
+A Node.js API server for HDHomeRun devices that automatically discovers devices on your network and provides REST endpoints and automatic HLS conversions for accessing DVR content. The server runs periodic discovery and maintains a local SQLite database of all devices, shows, and episodes.
 
 ## Features
 
