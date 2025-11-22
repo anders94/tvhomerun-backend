@@ -14,10 +14,12 @@ class HDHomeRunServer {
     this.app = express();
     this.port = options.port || 3000;
     this.verbose = options.verbose || false;
+    this.preCache = options.preCache || false;
     this.database = new HDHomeRunDatabase();
     this.hlsManager = new HLSStreamManager({ verbose: this.verbose });
     this.isDiscovering = false;
     this.lastDiscovery = null;
+    this.isBulkCaching = false;
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -94,7 +96,9 @@ class HDHomeRunServer {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         lastDiscovery: this.lastDiscovery,
-        isDiscovering: this.isDiscovering
+        isDiscovering: this.isDiscovering,
+        preCache: this.preCache,
+        isBulkCaching: this.isBulkCaching
       });
     });
 
@@ -106,6 +110,8 @@ class HDHomeRunServer {
           ...stats,
           lastDiscovery: this.lastDiscovery,
           isDiscovering: this.isDiscovering,
+          preCache: this.preCache,
+          isBulkCaching: this.isBulkCaching,
           serverStarted: new Date().toISOString()
         });
       } catch (error) {
@@ -583,10 +589,48 @@ class HDHomeRunServer {
       this.lastDiscovery = new Date().toISOString();
       this.log(`Discovery completed successfully at ${this.lastDiscovery}`);
 
+      // Start bulk HLS conversion if pre-cache is enabled
+      if (this.preCache && !this.isBulkCaching) {
+        this.log('Pre-cache enabled, starting bulk HLS conversion...');
+        this.startBulkCaching().catch(error => {
+          this.log(`Bulk caching failed: ${error.message}`);
+        });
+      }
+
     } catch (error) {
       this.log(`Discovery failed: ${error.message}`);
     } finally {
       this.isDiscovering = false;
+    }
+  }
+
+  async startBulkCaching() {
+    if (this.isBulkCaching) {
+      this.debug('Bulk caching already in progress');
+      return;
+    }
+
+    this.isBulkCaching = true;
+
+    try {
+      // Get all episodes from database
+      this.log('Fetching all episodes from database...');
+      const episodes = await this.database.getAllEpisodes();
+
+      if (episodes.length === 0) {
+        this.log('No episodes found for bulk caching');
+        return;
+      }
+
+      this.log(`Found ${episodes.length} episodes, starting bulk HLS conversion...`);
+
+      // Start bulk conversion (runs in background)
+      await this.hlsManager.startBulkConversion(episodes);
+
+    } catch (error) {
+      this.log(`Error during bulk caching: ${error.message}`);
+    } finally {
+      this.isBulkCaching = false;
     }
   }
 
@@ -622,6 +666,12 @@ class HDHomeRunServer {
       // Start server
       this.app.listen(this.port, () => {
         this.log(`HDHomeRun DVR API server running on port ${this.port}`);
+        this.log(`Pre-cache mode: ${this.preCache ? 'ENABLED' : 'DISABLED'}`);
+        if (this.preCache) {
+          this.log('  All episodes will be converted to HLS after discovery');
+        } else {
+          this.log('  Episodes will be converted to HLS on-demand');
+        }
         this.log('Available endpoints:');
         this.log('  GET /health - Health check');
         this.log('  GET /api/info - API statistics');
@@ -651,21 +701,22 @@ class HDHomeRunServer {
 // Handle startup
 if (require.main === module) {
   const verbose = process.argv.includes('--verbose') || process.argv.includes('-v');
+  const preCache = process.argv.includes('--pre-cache');
   const port = process.env.PORT || 3000;
-  
-  const server = new HDHomeRunServer({ port, verbose });
-  
+
+  const server = new HDHomeRunServer({ port, verbose, preCache });
+
   // Handle graceful shutdown
   process.on('SIGTERM', async () => {
     await server.stop();
     process.exit(0);
   });
-  
+
   process.on('SIGINT', async () => {
     await server.stop();
     process.exit(0);
   });
-  
+
   server.start().catch(error => {
     console.error('Failed to start server:', error);
     process.exit(1);

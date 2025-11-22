@@ -638,6 +638,42 @@ class HDHomeRunDatabase {
     return episodes || [];
   }
 
+  async getAllEpisodes() {
+    const episodes = await db.run(`
+      SELECT
+        e.id,
+        e.program_id,
+        e.title,
+        e.episode_title,
+        e.episode_number,
+        e.season_number,
+        e.episode_num,
+        e.synopsis,
+        e.category,
+        e.channel_name,
+        e.channel_number,
+        e.start_time,
+        e.end_time,
+        e.duration,
+        e.filename,
+        e.play_url,
+        e.cmd_url,
+        e.resume_position,
+        e.watched,
+        e.created_at,
+        s.series_id,
+        s.title as series_title,
+        s.image_url as series_image,
+        d.friendly_name as device_name
+      FROM episodes e
+      JOIN series s ON e.series_id = s.id
+      JOIN devices d ON s.device_id = d.id
+      ORDER BY e.created_at DESC
+    `);
+
+    return episodes || [];
+  }
+
   async searchSeries(query) {
     const series = await db.run(`
       SELECT 

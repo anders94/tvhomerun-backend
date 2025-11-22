@@ -10,14 +10,17 @@ This is a Node.js API server for HDHomeRun devices that automatically discovers 
 
 ### Running the API Server
 ```bash
-npm start          # Start API server on port 3000
-npm run dev        # Development mode with verbose logging
-npm run debug      # Same as dev mode
-npm run scan       # Run original CLI discovery tool
+npm start              # Start API server on port 3000
+npm run dev            # Development mode with verbose logging
+npm run debug          # Same as dev mode
+npm run pre-cache      # Start with HLS pre-caching enabled
+npm run dev:pre-cache  # Development mode with pre-caching
+npm run scan           # Run original CLI discovery tool
 ```
 
 ### Command Line Options
 - `--verbose` or `-v`: Enable debug logging for discovery and API operations
+- `--pre-cache`: Enable bulk HLS conversion of all episodes after discovery
 - `PORT` environment variable: Set server port (default: 3000)
 
 ## Architecture Overview
@@ -48,11 +51,20 @@ npm run scan       # Run original CLI discovery tool
 - Handles storage information and recording rules
 
 **src/database.js** - SQLite data persistence
-- Complete CRUD operations for devices, series, and episodes  
+- Complete CRUD operations for devices, series, and episodes
 - Automatic schema creation and migration support
 - Maintains referential integrity with foreign key constraints
-- API-specific query methods: getAllSeries(), getEpisodesBySeriesId(), searchSeries(), etc.
+- API-specific query methods: getAllSeries(), getEpisodesBySeriesId(), searchSeries(), getAllEpisodes(), etc.
 - Provides statistics and summary views for content analysis
+
+**src/hls-stream.js** - HLS transcoding and streaming manager
+- Manages FFmpeg-based transcoding of HDHomeRun recordings to HLS format
+- On-demand transcoding: Episodes are converted when first requested for playback
+- Bulk conversion mode: All episodes can be pre-cached when `--pre-cache` flag is used
+- Concurrent transcode limit (default: 2) to prevent system overload
+- Persistent cache tracking with state files for resumption after restarts
+- Progress tracking and logging for bulk conversions
+- Automatic cleanup of old cached content (30 days default)
 
 ### Key Technical Details
 
@@ -87,6 +99,13 @@ npm run scan       # Run original CLI discovery tool
 
 ### Episodes
 - `GET /api/episodes/recent` - Recently added episodes across all shows
+- `GET /api/episodes/:id` - Get specific episode details
+- `PUT /api/episodes/:id/progress` - Update episode playback progress
+
+### HLS Streaming
+- `GET /api/stream/:episodeId/playlist.m3u8` - Get HLS playlist for episode (initiates transcode if needed)
+- `GET /api/stream/:episodeId/:filename` - Serve HLS segment files
+- `GET /api/stream/:episodeId/status` - Get transcode status for episode
 
 ### Discovery
 - `POST /api/discover` - Manual discovery trigger (returns immediately, runs in background)
@@ -101,9 +120,27 @@ npm run scan       # Run original CLI discovery tool
 
 ### Discovery Process
 1. **Discovery Phase**: UDP broadcast → HTTP fallback → network scanning → device validation
-2. **Storage Detection**: Check multiple endpoints to identify DVR-capable devices  
+2. **Storage Detection**: Check multiple endpoints to identify DVR-capable devices
 3. **Content Retrieval**: Series list → individual episode details → metadata parsing
 4. **Database Sync**: Upsert devices/series/episodes with conflict resolution
+5. **Bulk HLS Conversion** (if `--pre-cache` enabled): Queue all episodes → transcode with concurrency limit → log progress
+
+### HLS Transcoding Flow
+
+**On-Demand Mode** (default):
+1. Client requests episode playlist: `GET /api/stream/:episodeId/playlist.m3u8`
+2. Server checks if episode is already transcoded
+3. If not cached, FFmpeg transcoding starts in background
+4. Server waits for initial playlist generation (15s timeout)
+5. Playlist is served to client, segments stream as transcoding progresses
+6. Completed transcodes are cached for future playback
+
+**Pre-Cache Mode** (`--pre-cache` flag):
+1. After discovery completes, all episodes are queued for bulk conversion
+2. Episodes are transcoded up to concurrent limit (2 by default)
+3. Progress is logged periodically: "Bulk conversion progress: X/Y (Z%)"
+4. On-demand requests can still initiate transcodes during bulk conversion
+5. Bulk conversion continues in background without blocking API requests
 
 ## Protocol Implementation
 

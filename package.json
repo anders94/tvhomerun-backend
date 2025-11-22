@@ -7,6 +7,8 @@
     "start": "node src/server.js",
     "dev": "node src/server.js --verbose",
     "debug": "node src/server.js --verbose",
+    "pre-cache": "node src/server.js --pre-cache",
+    "dev:pre-cache": "node src/server.js --verbose --pre-cache",
     "scan": "node src/index.js"
   },
   "dependencies": {

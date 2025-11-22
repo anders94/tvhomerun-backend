@@ -45,6 +45,12 @@ npm start
 # Development mode with verbose logging
 npm run dev
 
+# Pre-cache mode (convert all episodes to HLS on discovery)
+npm run pre-cache
+
+# Development mode with pre-cache
+npm run dev:pre-cache
+
 # Custom port
 PORT=8080 npm start
 ```
@@ -59,7 +65,21 @@ npm run scan
 ### Command Line Options
 
 - `--verbose` or `-v`: Enable debug logging for discovery and API operations
+- `--pre-cache`: Enable bulk HLS conversion of all episodes after discovery (increases storage usage but improves playback startup time)
 - `PORT` environment variable: Set server port (default: 3000)
+
+### HLS Streaming
+
+The server supports on-demand HLS transcoding of recordings. By default, episodes are converted to HLS format when first requested for playback. This saves storage space but may have a delay on first playback.
+
+With `--pre-cache` enabled:
+- All episodes are converted to HLS after each discovery
+- Conversions respect the concurrent transcode limit (2 by default)
+- Progress messages are logged during conversion
+- On-demand conversions still work for newly requested episodes during bulk conversion
+- Ideal for dedicated media servers with ample storage
+
+HLS conversion endpoint: `GET /api/stream/:episodeId/playlist.m3u8`
 
 ## API Endpoints
 

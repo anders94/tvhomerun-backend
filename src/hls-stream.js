@@ -33,6 +33,16 @@ class HLSStreamManager {
     // Track active transcodes in order (oldest first) for LRU eviction
     this.activeTranscodes = [];
 
+    // Bulk conversion queue
+    this.bulkConversionQueue = [];
+    this.isBulkConverting = false;
+    this.bulkConversionStats = {
+      total: 0,
+      completed: 0,
+      failed: 0,
+      skipped: 0
+    };
+
     // Load existing cache state on startup
     this.loadCacheState();
   }
@@ -146,9 +156,10 @@ class HLSStreamManager {
    * Start transcoding an episode to HLS
    * @param {string} episodeId - Episode ID
    * @param {string} sourceUrl - HDHomeRun stream URL
+   * @param {boolean} isBulkConversion - Whether this is part of bulk conversion (won't evict)
    * @returns {Promise<string>} - Path to output directory
    */
-  async startTranscode(episodeId, sourceUrl) {
+  async startTranscode(episodeId, sourceUrl, isBulkConversion = false) {
     // Check if already transcoded
     const existingJob = this.transcodeJobs.get(episodeId);
 
@@ -166,11 +177,18 @@ class HLSStreamManager {
 
     const outputDir = this.getStreamDir(episodeId);
 
-    // Check concurrent transcode limit and evict oldest if needed
+    // Check concurrent transcode limit
     const activeCount = this.activeTranscodes.length;
     if (activeCount >= this.maxConcurrentTranscodes) {
-      this.log(`Concurrent transcode limit reached (${activeCount}/${this.maxConcurrentTranscodes}), evicting oldest`);
-      await this.evictOldestTranscode();
+      if (isBulkConversion) {
+        // For bulk conversion, wait for a slot to open up instead of evicting
+        this.debug(`Concurrent transcode limit reached, waiting for slot (bulk conversion mode)`);
+        return outputDir; // Return early, will be retried from queue
+      } else {
+        // For on-demand requests, evict oldest transcode
+        this.log(`Concurrent transcode limit reached (${activeCount}/${this.maxConcurrentTranscodes}), evicting oldest`);
+        await this.evictOldestTranscode();
+      }
     }
 
     // Create output directory
@@ -260,6 +278,12 @@ class HLSStreamManager {
         this.debug(`Removed episode ${episodeId} from active queue due to error (${this.activeTranscodes.length} active)`);
       }
 
+      // Update bulk conversion stats if active
+      if (this.isBulkConverting) {
+        this.bulkConversionStats.failed++;
+        this.logBulkProgress();
+      }
+
       this.saveTranscodeState(episodeId, {
         state: TRANSCODE_STATE.ERROR,
         startTime: job.startTime,
@@ -283,6 +307,12 @@ class HLSStreamManager {
         job.progress = 100;
         delete job.process;
 
+        // Update bulk conversion stats if active
+        if (this.isBulkConverting) {
+          this.bulkConversionStats.completed++;
+          this.logBulkProgress();
+        }
+
         this.saveTranscodeState(episodeId, {
           state: TRANSCODE_STATE.COMPLETE,
           startTime: job.startTime,
@@ -293,6 +323,12 @@ class HLSStreamManager {
         this.log(`FFmpeg process for episode ${episodeId} exited with code ${code}`);
         job.state = TRANSCODE_STATE.ERROR;
         job.error = `FFmpeg exited with code ${code}`;
+
+        // Update bulk conversion stats if active
+        if (this.isBulkConverting) {
+          this.bulkConversionStats.failed++;
+          this.logBulkProgress();
+        }
 
         this.saveTranscodeState(episodeId, {
           state: TRANSCODE_STATE.ERROR,
@@ -465,10 +501,111 @@ class HLSStreamManager {
   }
 
   /**
+   * Start bulk conversion of all episodes
+   * @param {Array} episodes - Array of episode objects with id and play_url
+   */
+  async startBulkConversion(episodes) {
+    if (this.isBulkConverting) {
+      this.log('Bulk conversion already in progress');
+      return;
+    }
+
+    this.isBulkConverting = true;
+
+    // Filter out episodes that are already transcoded
+    const episodesToConvert = episodes.filter(episode => {
+      const job = this.transcodeJobs.get(String(episode.id));
+      return !job || job.state !== TRANSCODE_STATE.COMPLETE;
+    });
+
+    this.bulkConversionQueue = episodesToConvert.map(ep => ({
+      id: String(ep.id),
+      sourceUrl: ep.play_url || ep.source_url,
+      title: ep.title || ep.episode_title || 'Unknown'
+    }));
+
+    this.bulkConversionStats = {
+      total: this.bulkConversionQueue.length,
+      completed: 0,
+      failed: 0,
+      skipped: 0
+    };
+
+    this.log(`Starting bulk conversion of ${this.bulkConversionQueue.length} episodes (${episodes.length - this.bulkConversionQueue.length} already cached)`);
+
+    // Start processing the queue
+    this.processBulkConversionQueue();
+  }
+
+  /**
+   * Process the bulk conversion queue
+   */
+  async processBulkConversionQueue() {
+    while (this.bulkConversionQueue.length > 0 || this.activeTranscodes.length > 0) {
+      // Check if we have room for more transcodes
+      if (this.activeTranscodes.length >= this.maxConcurrentTranscodes || this.bulkConversionQueue.length === 0) {
+        // Wait a bit before checking again
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        continue;
+      }
+
+      // Get next episode from queue
+      const episode = this.bulkConversionQueue.shift();
+
+      if (!episode || !episode.sourceUrl) {
+        this.bulkConversionStats.skipped++;
+        this.log(`Skipped episode ${episode?.id} (no source URL)`);
+        continue;
+      }
+
+      // Check if already transcoded (might have been requested on-demand)
+      const existingJob = this.transcodeJobs.get(episode.id);
+      if (existingJob && existingJob.state === TRANSCODE_STATE.COMPLETE) {
+        this.bulkConversionStats.skipped++;
+        this.debug(`Skipped episode ${episode.id} (already transcoded)`);
+        this.logBulkProgress();
+        continue;
+      }
+
+      // Start transcode
+      this.log(`Bulk converting episode ${episode.id}: ${episode.title}`);
+
+      try {
+        await this.startTranscode(episode.id, episode.sourceUrl, true);
+        // Note: completed/failed stats are updated in the FFmpeg event handlers
+      } catch (error) {
+        this.log(`Failed to start conversion for episode ${episode.id}: ${error.message}`);
+        this.bulkConversionStats.failed++;
+        this.logBulkProgress();
+      }
+    }
+
+    this.isBulkConverting = false;
+    this.log(`Bulk conversion complete! Stats: ${this.bulkConversionStats.completed} completed, ${this.bulkConversionStats.failed} failed, ${this.bulkConversionStats.skipped} skipped`);
+  }
+
+  /**
+   * Log bulk conversion progress
+   */
+  logBulkProgress() {
+    const stats = this.bulkConversionStats;
+    const processed = stats.completed + stats.failed + stats.skipped;
+    const percentage = Math.round((processed / stats.total) * 100);
+    const remaining = this.bulkConversionQueue.length;
+    const active = this.activeTranscodes.length;
+
+    this.log(`Bulk conversion progress: ${processed}/${stats.total} (${percentage}%) - ${remaining} queued, ${active} active transcodes`);
+  }
+
+  /**
    * Shutdown - stop all transcoding and cleanup
    */
   async shutdown() {
     this.log('Shutting down HLS stream manager...');
+
+    // Stop bulk conversion
+    this.isBulkConverting = false;
+    this.bulkConversionQueue = [];
 
     // Stop all active transcodes
     for (const [episodeId, job] of this.transcodeJobs.entries()) {
