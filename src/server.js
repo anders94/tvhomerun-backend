@@ -12,6 +12,7 @@ const HLSStreamManager = require('./hls-stream');
 class HDHomeRunServer {
   constructor(options = {}) {
     this.app = express();
+    this.host = options.host || '127.0.0.1';
     this.port = options.port || 3000;
     this.verbose = options.verbose || false;
     this.preCache = options.preCache || false;
@@ -664,8 +665,8 @@ class HDHomeRunServer {
       this.setupScheduler();
 
       // Start server
-      this.app.listen(this.port, () => {
-        this.log(`HDHomeRun DVR API server running on port ${this.port}`);
+      this.app.listen(this.port, this.host, () => {
+        this.log(`HDHomeRun DVR API server running on http://${this.host}:${this.port}`);
         this.log(`Pre-cache mode: ${this.preCache ? 'ENABLED' : 'DISABLED'}`);
         if (this.preCache) {
           this.log('  All episodes will be converted to HLS after discovery');
@@ -702,9 +703,10 @@ class HDHomeRunServer {
 if (require.main === module) {
   const verbose = process.argv.includes('--verbose') || process.argv.includes('-v');
   const preCache = process.argv.includes('--pre-cache');
+  const host = process.env.HOST || '127.0.0.1';
   const port = process.env.PORT || 3000;
 
-  const server = new HDHomeRunServer({ port, verbose, preCache });
+  const server = new HDHomeRunServer({ host, port, verbose, preCache });
 
   // Handle graceful shutdown
   process.on('SIGTERM', async () => {
