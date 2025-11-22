@@ -7,6 +7,7 @@ This is a backend server for the [TVHomeRun](https://github.com/anders94/tvhomer
 - **Automatic Device Discovery**: Multi-method discovery using UDP broadcast, HTTP fallback, and network scanning
 - **DVR Content Management**: Access recorded shows, episodes, and metadata from HDHomeRun DVR devices
 - **REST API**: Clean JSON endpoints for integration with web apps, mobile apps, or home automation systems
+- **HLS Proxy**: Automatically creates HLS versions of episodes supporting native playback on Apple devices
 - **Periodic Sync**: Automatic hourly discovery to keep content up-to-date
 - **SQLite Database**: Local storage for offline browsing and fast queries
 - **Search & Filter**: Find shows by title, category, or other criteria
