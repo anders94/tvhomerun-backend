@@ -616,17 +616,31 @@ class HDHomeRunServer {
     try {
       // Get all episodes from database
       this.log('Fetching all episodes from database...');
-      const episodes = await this.database.getAllEpisodes();
+      const allEpisodes = await this.database.getAllEpisodes();
 
-      if (episodes.length === 0) {
+      if (allEpisodes.length === 0) {
         this.log('No episodes found for bulk caching');
         return;
       }
 
-      this.log(`Found ${episodes.length} episodes, starting bulk HLS conversion...`);
+      // Filter to only episodes recorded in the past month (30 days)
+      const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+      const recentEpisodes = allEpisodes.filter(episode => {
+        // Use start_time for filtering (Unix timestamp in seconds)
+        return episode.start_time >= thirtyDaysAgo;
+      });
+
+      this.log(`Found ${allEpisodes.length} total episodes, ${recentEpisodes.length} recorded in the past month`);
+
+      if (recentEpisodes.length === 0) {
+        this.log('No recent episodes found for bulk caching');
+        return;
+      }
+
+      this.log(`Starting bulk HLS conversion of ${recentEpisodes.length} recent episodes...`);
 
       // Start bulk conversion (runs in background)
-      await this.hlsManager.startBulkConversion(episodes);
+      await this.hlsManager.startBulkConversion(recentEpisodes);
 
     } catch (error) {
       this.log(`Error during bulk caching: ${error.message}`);
