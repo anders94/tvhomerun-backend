@@ -53,6 +53,9 @@ class HLSStreamManager {
       await mkdir(this.cacheDir, { recursive: true });
       this.log('HLS cache directory initialized');
 
+      // Clean up abandoned transcodes first (before scanning existing cache)
+      await this.cleanupAbandonedTranscodes();
+
       // Scan for existing transcoded content
       await this.scanExistingCache();
     } catch (error) {
@@ -71,6 +74,50 @@ class HLSStreamManager {
     if (this.verbose) {
       const timestamp = new Date().toISOString();
       console.log(`[${timestamp}] [HLS] [DEBUG] ${message}`);
+    }
+  }
+
+  /**
+   * Clean up abandoned transcodes on startup
+   * Removes any directories that have state="transcoding" in transcode.json
+   */
+  async cleanupAbandonedTranscodes() {
+    try {
+      const entries = await readdir(this.cacheDir);
+      let cleanedCount = 0;
+
+      for (const entry of entries) {
+        const episodeDir = path.join(this.cacheDir, entry);
+
+        try {
+          const stats = await stat(episodeDir);
+
+          if (stats.isDirectory()) {
+            // Check for transcode.json state file
+            const stateData = await this.loadTranscodeState(entry);
+
+            if (stateData && stateData.state === TRANSCODE_STATE.TRANSCODING) {
+              this.log(`Cleaning up abandoned transcode: episode ${entry}`);
+              await this.cleanupStreamDir(episodeDir);
+              cleanedCount++;
+            }
+          }
+        } catch (error) {
+          // Ignore errors for individual directories (might not have state file)
+          this.debug(`Error checking directory ${entry}: ${error.message}`);
+        }
+      }
+
+      if (cleanedCount > 0) {
+        this.log(`Cleaned up ${cleanedCount} abandoned transcode(s)`);
+      } else {
+        this.debug('No abandoned transcodes found');
+      }
+    } catch (error) {
+      // If cache directory doesn't exist yet, that's ok
+      if (error.code !== 'ENOENT') {
+        this.debug(`Error cleaning up abandoned transcodes: ${error.message}`);
+      }
     }
   }
 
