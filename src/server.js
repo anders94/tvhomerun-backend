@@ -674,6 +674,10 @@ class HDHomeRunServer {
       this.log('Initializing database...');
       await this.database.initialize();
 
+      // Recalculate series statistics (fixes existing databases and ensures counts are correct)
+      this.log('Recalculating series statistics...');
+      await this.database.recalculateSeriesStats();
+
       // Initialize HLS stream manager
       this.log('Initializing HLS stream manager...');
       await this.hlsManager.initialize();

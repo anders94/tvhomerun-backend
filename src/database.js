@@ -12,18 +12,21 @@ class HDHomeRunDatabase {
     // Open database connection
     await db.open(this.dbPath);
     this.isOpen = true;
-    
+
     // Check if tables exist, if not create them
     const tables = await db.run(`
-      SELECT name FROM sqlite_master 
+      SELECT name FROM sqlite_master
       WHERE type='table' AND name IN ('devices', 'series', 'episodes')
     `);
-    
+
     if (!tables || tables.length === 0) {
       console.log('Database not found, creating schema...');
       await this.createSchema();
+    } else {
+      // Ensure triggers exist (for databases created before triggers were added)
+      await this.ensureTriggersExist();
     }
-    
+
     return db;
   }
 
@@ -121,6 +124,61 @@ class HDHomeRunDatabase {
     await db.run(`CREATE INDEX idx_episodes_series ON episodes(series_id)`);
     await db.run(`CREATE INDEX idx_episodes_program_id ON episodes(program_id)`);
     await db.run(`CREATE INDEX idx_episodes_start_time ON episodes(start_time)`);
+
+    // Create triggers to maintain series statistics
+    await db.run(`
+      CREATE TRIGGER update_series_stats_insert
+      AFTER INSERT ON episodes
+      BEGIN
+        UPDATE series SET
+          episode_count = (SELECT COUNT(*) FROM episodes WHERE series_id = NEW.series_id),
+          total_duration = (SELECT COALESCE(SUM(duration), 0) FROM episodes WHERE series_id = NEW.series_id),
+          first_recorded = COALESCE(
+            (SELECT MIN(start_time) FROM episodes WHERE series_id = NEW.series_id),
+            first_recorded
+          ),
+          last_recorded = COALESCE(
+            (SELECT MAX(start_time) FROM episodes WHERE series_id = NEW.series_id),
+            last_recorded
+          ),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = NEW.series_id;
+      END
+    `);
+
+    await db.run(`
+      CREATE TRIGGER update_series_stats_update
+      AFTER UPDATE ON episodes
+      BEGIN
+        UPDATE series SET
+          episode_count = (SELECT COUNT(*) FROM episodes WHERE series_id = NEW.series_id),
+          total_duration = (SELECT COALESCE(SUM(duration), 0) FROM episodes WHERE series_id = NEW.series_id),
+          first_recorded = COALESCE(
+            (SELECT MIN(start_time) FROM episodes WHERE series_id = NEW.series_id),
+            first_recorded
+          ),
+          last_recorded = COALESCE(
+            (SELECT MAX(start_time) FROM episodes WHERE series_id = NEW.series_id),
+            last_recorded
+          ),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = NEW.series_id;
+      END
+    `);
+
+    await db.run(`
+      CREATE TRIGGER update_series_stats_delete
+      AFTER DELETE ON episodes
+      BEGIN
+        UPDATE series SET
+          episode_count = (SELECT COUNT(*) FROM episodes WHERE series_id = OLD.series_id),
+          total_duration = (SELECT COALESCE(SUM(duration), 0) FROM episodes WHERE series_id = OLD.series_id),
+          first_recorded = (SELECT MIN(start_time) FROM episodes WHERE series_id = OLD.series_id),
+          last_recorded = (SELECT MAX(start_time) FROM episodes WHERE series_id = OLD.series_id),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = OLD.series_id;
+      END
+    `);
 
     console.log('Database schema created successfully.');
   }
@@ -735,6 +793,108 @@ class HDHomeRunDatabase {
 
     // Return the updated episode
     return await this.getEpisodeById(episodeId);
+  }
+
+  async ensureTriggersExist() {
+    // Check if triggers exist
+    const triggers = await db.run(`
+      SELECT name FROM sqlite_master
+      WHERE type='trigger' AND name IN (
+        'update_series_stats_insert',
+        'update_series_stats_update',
+        'update_series_stats_delete'
+      )
+    `);
+
+    // If any triggers are missing, drop all and recreate
+    if (!triggers || triggers.length < 3) {
+      console.log('Triggers missing or incomplete, creating them...');
+
+      // Drop existing triggers if any
+      await db.run(`DROP TRIGGER IF EXISTS update_series_stats_insert`);
+      await db.run(`DROP TRIGGER IF EXISTS update_series_stats_update`);
+      await db.run(`DROP TRIGGER IF EXISTS update_series_stats_delete`);
+
+      // Create triggers
+      await db.run(`
+        CREATE TRIGGER update_series_stats_insert
+        AFTER INSERT ON episodes
+        BEGIN
+          UPDATE series SET
+            episode_count = (SELECT COUNT(*) FROM episodes WHERE series_id = NEW.series_id),
+            total_duration = (SELECT COALESCE(SUM(duration), 0) FROM episodes WHERE series_id = NEW.series_id),
+            first_recorded = COALESCE(
+              (SELECT MIN(start_time) FROM episodes WHERE series_id = NEW.series_id),
+              first_recorded
+            ),
+            last_recorded = COALESCE(
+              (SELECT MAX(start_time) FROM episodes WHERE series_id = NEW.series_id),
+              last_recorded
+            ),
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = NEW.series_id;
+        END
+      `);
+
+      await db.run(`
+        CREATE TRIGGER update_series_stats_update
+        AFTER UPDATE ON episodes
+        BEGIN
+          UPDATE series SET
+            episode_count = (SELECT COUNT(*) FROM episodes WHERE series_id = NEW.series_id),
+            total_duration = (SELECT COALESCE(SUM(duration), 0) FROM episodes WHERE series_id = NEW.series_id),
+            first_recorded = COALESCE(
+              (SELECT MIN(start_time) FROM episodes WHERE series_id = NEW.series_id),
+              first_recorded
+            ),
+            last_recorded = COALESCE(
+              (SELECT MAX(start_time) FROM episodes WHERE series_id = NEW.series_id),
+              last_recorded
+            ),
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = NEW.series_id;
+        END
+      `);
+
+      await db.run(`
+        CREATE TRIGGER update_series_stats_delete
+        AFTER DELETE ON episodes
+        BEGIN
+          UPDATE series SET
+            episode_count = (SELECT COUNT(*) FROM episodes WHERE series_id = OLD.series_id),
+            total_duration = (SELECT COALESCE(SUM(duration), 0) FROM episodes WHERE series_id = OLD.series_id),
+            first_recorded = (SELECT MIN(start_time) FROM episodes WHERE series_id = OLD.series_id),
+            last_recorded = (SELECT MAX(start_time) FROM episodes WHERE series_id = OLD.series_id),
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = OLD.series_id;
+        END
+      `);
+
+      console.log('Triggers created successfully');
+    }
+  }
+
+  async recalculateSeriesStats() {
+    // Recalculate statistics for all series
+    // Useful for fixing existing databases or after adding triggers
+    await db.run(`
+      UPDATE series SET
+        episode_count = (
+          SELECT COUNT(*) FROM episodes WHERE series_id = series.id
+        ),
+        total_duration = (
+          SELECT COALESCE(SUM(duration), 0) FROM episodes WHERE series_id = series.id
+        ),
+        first_recorded = (
+          SELECT MIN(start_time) FROM episodes WHERE series_id = series.id
+        ),
+        last_recorded = (
+          SELECT MAX(start_time) FROM episodes WHERE series_id = series.id
+        ),
+        updated_at = CURRENT_TIMESTAMP
+    `);
+
+    console.log('Series statistics recalculated successfully');
   }
 
   async close() {
