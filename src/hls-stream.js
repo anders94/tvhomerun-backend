@@ -204,9 +204,10 @@ class HLSStreamManager {
    * @param {string} episodeId - Episode ID
    * @param {string} sourceUrl - HDHomeRun stream URL
    * @param {boolean} isBulkConversion - Whether this is part of bulk conversion (won't evict)
+   * @param {Object} metadata - Optional metadata (showName, episodeName, airDate)
    * @returns {Promise<string>} - Path to output directory
    */
-  async startTranscode(episodeId, sourceUrl, isBulkConversion = false) {
+  async startTranscode(episodeId, sourceUrl, isBulkConversion = false, metadata = {}) {
     // Check if already transcoded
     const existingJob = this.transcodeJobs.get(episodeId);
 
@@ -281,7 +282,8 @@ class HLSStreamManager {
       startTime: Date.now(),
       progress: 0,
       outputDir,
-      sourceUrl
+      sourceUrl,
+      metadata
     };
 
     this.transcodeJobs.set(episodeId, job);
@@ -294,7 +296,10 @@ class HLSStreamManager {
     await this.saveTranscodeState(episodeId, {
       state: TRANSCODE_STATE.TRANSCODING,
       startTime: job.startTime,
-      sourceUrl
+      sourceUrl,
+      showName: metadata.showName,
+      episodeName: metadata.episodeName,
+      airDate: metadata.airDate
     });
 
     // Handle FFmpeg output for progress tracking
@@ -335,7 +340,10 @@ class HLSStreamManager {
         state: TRANSCODE_STATE.ERROR,
         startTime: job.startTime,
         endTime: Date.now(),
-        error: error.message
+        error: error.message,
+        showName: job.metadata.showName,
+        episodeName: job.metadata.episodeName,
+        airDate: job.metadata.airDate
       });
     });
 
@@ -364,7 +372,10 @@ class HLSStreamManager {
           state: TRANSCODE_STATE.COMPLETE,
           startTime: job.startTime,
           endTime: job.endTime,
-          sourceUrl: job.sourceUrl
+          sourceUrl: job.sourceUrl,
+          showName: job.metadata.showName,
+          episodeName: job.metadata.episodeName,
+          airDate: job.metadata.airDate
         });
       } else {
         this.log(`FFmpeg process for episode ${episodeId} exited with code ${code}`);
@@ -382,7 +393,10 @@ class HLSStreamManager {
           startTime: job.startTime,
           endTime: Date.now(),
           error: job.error,
-          stderr: stderr.slice(-1000) // Last 1000 chars of stderr
+          stderr: stderr.slice(-1000), // Last 1000 chars of stderr
+          showName: job.metadata.showName,
+          episodeName: job.metadata.episodeName,
+          airDate: job.metadata.airDate
         });
       }
     });
@@ -568,7 +582,12 @@ class HLSStreamManager {
     this.bulkConversionQueue = episodesToConvert.map(ep => ({
       id: String(ep.id),
       sourceUrl: ep.play_url || ep.source_url,
-      title: ep.title || ep.episode_title || 'Unknown'
+      title: ep.title || ep.episode_title || 'Unknown',
+      metadata: {
+        showName: ep.series_title,
+        episodeName: ep.episode_title || ep.title,
+        airDate: ep.start_time ? new Date(ep.start_time * 1000).toISOString() : null
+      }
     }));
 
     this.bulkConversionStats = {
@@ -618,7 +637,7 @@ class HLSStreamManager {
       this.log(`Bulk converting episode ${episode.id}: ${episode.title}`);
 
       try {
-        await this.startTranscode(episode.id, episode.sourceUrl, true);
+        await this.startTranscode(episode.id, episode.sourceUrl, true, episode.metadata);
         // Note: completed/failed stats are updated in the FFmpeg event handlers
       } catch (error) {
         this.log(`Failed to start conversion for episode ${episode.id}: ${error.message}`);

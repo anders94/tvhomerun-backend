@@ -409,8 +409,15 @@ class HDHomeRunServer {
 
         this.debug(`HLS playlist requested for episode ${episodeId}: ${episode.title}`);
 
+        // Prepare metadata for transcode
+        const metadata = {
+          showName: episode.series_title,
+          episodeName: episode.episode_title || episode.title,
+          airDate: episode.start_time ? new Date(episode.start_time * 1000).toISOString() : null
+        };
+
         // Start transcoding (or reuse existing transcode)
-        const outputDir = await this.hlsManager.startTranscode(episodeId, sourceUrl);
+        const outputDir = await this.hlsManager.startTranscode(episodeId, sourceUrl, false, metadata);
         const playlistPath = path.join(outputDir, 'stream.m3u8');
 
         // Read and serve the playlist
