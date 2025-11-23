@@ -1,6 +1,6 @@
 # TVHomeRun Backend
 
-This is a backend server for TVHomeRun apps including [TVHomeRun tvOS](https://github.com/anders94/tvhomerun-tvos) for AppleTV and [TVHomeRun iOS](https://github.com/anders94/tvhomerun-ios) for iPhone. It is a Node.js API server for [HDHomeRun devices](https://www.silicondust.com/hdhomerun/) that automatically discovers devices on your network and provides REST endpoints and automatic HLS conversions for accessing DVR content. The server runs periodic discovery and maintains a local SQLite database of all devices, shows, and episodes.
+This is a backend server for TVHomeRun apps including [TVHomeRun tvOS](https://github.com/anders94/tvhomerun-tvos) for AppleTV, [TVHomeRun iOS](https://github.com/anders94/tvhomerun-ios) for iPhone and [TVHomeRun Web](https://github.com/anders94/tvhomerun-web). It is a Node.js API server for [HDHomeRun devices](https://www.silicondust.com/hdhomerun/) that automatically discovers devices on your network and provides REST endpoints and automatic HLS conversions for accessing DVR content. The server runs periodic discovery and maintains a local SQLite database of all devices, shows, and episodes.
 
 ## Features
 
