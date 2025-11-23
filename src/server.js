@@ -657,10 +657,6 @@ class HDHomeRunServer {
       this.log('Initializing HLS stream manager...');
       await this.hlsManager.initialize();
 
-      // Run initial discovery
-      this.log('Running initial discovery...');
-      await this.runDiscovery();
-
       // Setup scheduled discovery
       this.setupScheduler();
 
@@ -686,6 +682,13 @@ class HDHomeRunServer {
         this.log('  GET /api/stream/:episodeId/playlist.m3u8 - HLS stream');
         this.log('  GET /api/stream/:episodeId/status - Transcode status');
       });
+
+      // Run initial discovery in background (doesn't block server startup)
+      this.log('Starting initial discovery in background...');
+      this.runDiscovery().catch(error => {
+        this.log(`Initial discovery failed: ${error.message}`);
+      });
+
     } catch (error) {
       this.log(`Failed to start server: ${error.message}`);
       process.exit(1);
