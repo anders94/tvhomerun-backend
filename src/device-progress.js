@@ -110,7 +110,7 @@ class DeviceProgressTool {
 
   /**
    * Set progress on HDHomeRun device
-   * Note: This uses undocumented APIs and may not work on all devices/firmware versions
+   * Format: POST /recorded/cmd?id={id}&cmd=set&Resume={position}
    */
   async setProgressOnDevice(episode, position, watched = null) {
     if (!episode.cmd_url) {
@@ -118,42 +118,28 @@ class DeviceProgressTool {
     }
 
     try {
-      this.log(`Setting progress on device via: ${episode.cmd_url}`);
+      // HDHomeRun uses cmd=set with Resume as a query parameter
+      // Special value 4294967295 (max uint32) indicates "watched"
+      const resumeValue = watched ? '4294967295' : position.toString();
+      const url = `${episode.cmd_url}&cmd=set&Resume=${resumeValue}`;
 
-      // Prepare form data
-      const formData = new URLSearchParams();
-      formData.append('Resume', position.toString());
+      this.log(`Setting progress on device: ${url}`);
 
-      if (watched !== null) {
-        // If watched is true, set Resume to special value (4294967295 = max uint32, indicates watched)
-        // If watched is false, use the provided position
-        if (watched) {
-          formData.append('Resume', '4294967295');
-        }
-      }
-
-      // Attempt to POST to the command URL
-      const response = await axios.post(episode.cmd_url, formData, {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
+      const response = await axios.post(url, null, {
         timeout: 5000
       });
 
       this.log(`Device response status: ${response.status}`);
-      this.log(`Device response: ${JSON.stringify(response.data)}`);
 
       return {
         success: true,
-        status: response.status,
-        data: response.data
+        status: response.status
       };
     } catch (error) {
       if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        throw new Error(`Cannot connect to HDHomeRun device at ${episode.cmd_url}`);
+        throw new Error(`Cannot connect to HDHomeRun device`);
       }
 
-      // Some devices may return errors for this undocumented API
       if (error.response) {
         throw new Error(`Device rejected request: ${error.response.status} ${error.response.statusText}`);
       }

@@ -50,40 +50,35 @@ class HDHomeRunServer {
   }
 
   async relayProgressToHDHomeRun(cmdUrl, position, watched) {
-    // Attempt to relay progress to HDHomeRun's CmdURL endpoint
-    // This uses undocumented APIs and may not work on all devices/firmware versions
+    // Relay progress to HDHomeRun's CmdURL endpoint
+    // Format: POST /recorded/cmd?id={id}&cmd=set&Resume={position}
 
     try {
-      this.debug(`Attempting to relay progress to HDHomeRun: ${cmdUrl}`);
+      this.log(`Attempting to relay progress to HDHomeRun:`);
+      this.log(`  URL: ${cmdUrl}`);
+      this.log(`  Position: ${position}`);
+      this.log(`  Watched: ${watched}`);
 
-      // Prepare form data
-      // HDHomeRun uses 'Resume' (capital R) as the parameter name
-      // Always send position first, then append special value 4294967295 if watched
-      const formData = new URLSearchParams();
-      formData.append('Resume', position.toString());
+      // HDHomeRun uses cmd=set with Resume as a query parameter
+      // Special value 4294967295 (max uint32) indicates "watched"
+      const resumeValue = watched ? '4294967295' : position.toString();
+      const url = `${cmdUrl}&cmd=set&Resume=${resumeValue}`;
 
-      if (watched) {
-        // If watched is true, append Resume again with special value (max uint32 = watched)
-        // This sends both values: Resume=position&Resume=4294967295
-        formData.append('Resume', '4294967295');
-      }
+      this.log(`  Request URL: ${url}`);
 
-      const response = await axios.post(cmdUrl, formData, {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
+      const response = await axios.post(url, null, {
         timeout: 5000
       });
 
-      this.debug(`HDHomeRun progress relay response: ${response.status}`);
-      this.log(`✓ Progress synced to HDHomeRun device (Resume: ${watched ? position + ' + 4294967295 (watched)' : position})`);
+      this.log(`✓ Progress synced to HDHomeRun device (Resume: ${resumeValue})`);
       return { success: true, status: response.status };
     } catch (error) {
-      // Log error but don't throw - this is best-effort since API isn't officially documented
+      this.log(`✗ HDHomeRun device sync failed:`);
       if (error.response) {
-        this.debug(`HDHomeRun progress relay failed: ${error.response.status} ${error.response.statusText}`);
+        this.log(`  Status: ${error.response.status} ${error.response.statusText}`);
+        this.log(`  Response data: ${JSON.stringify(error.response.data)}`);
       } else {
-        this.debug(`HDHomeRun progress relay failed: ${error.message}`);
+        this.log(`  Error: ${error.message}`);
       }
       this.log(`⚠️  Warning: Could not sync progress to HDHomeRun device: ${error.message}`);
       return { success: false, error: error.message };
