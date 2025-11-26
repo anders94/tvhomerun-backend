@@ -93,10 +93,11 @@ class HDHomeRunServer {
   setupMiddleware() {
     this.app.use(cors());
     this.app.use(express.json());
-    
-    // Request logging
+
+    // Request logging (always enabled)
     this.app.use((req, res, next) => {
-      this.debug(`${req.method} ${req.path} - ${req.ip}`);
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] ${req.method} ${req.path} - ${req.ip}`);
       next();
     });
   }
