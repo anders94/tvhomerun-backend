@@ -7,8 +7,9 @@ This document provides a comprehensive overview of the HDHomeRun device discover
 1. [Device Discovery Protocol](#device-discovery-protocol)
 2. [HTTP API Endpoints](#http-api-endpoints)
 3. [DVR Content Access](#dvr-content-access)
-4. [Implementation Guide](#implementation-guide)
-5. [External References](#external-references)
+4. [Updating DVR Content](#updating-dvr-content)
+5. [Implementation Guide](#implementation-guide)
+6. [External References](#external-references)
 
 ## Device Discovery Protocol
 
@@ -42,15 +43,15 @@ To discover all HDHomeRun devices, send a UDP broadcast to `255.255.255.255:6500
 ```javascript
 // Example discovery packet construction
 const payload = Buffer.alloc(12);
-payload.writeUInt8(0x01, 0);        // HDHOMERUN_TAG_DEVICE_TYPE
-payload.writeUInt8(0x04, 1);        // Length: 4 bytes
-payload.writeUInt32BE(0xFFFFFFFF, 2); // Device type wildcard
-payload.writeUInt8(0x02, 6);        // HDHOMERUN_TAG_DEVICE_ID  
-payload.writeUInt8(0x04, 7);        // Length: 4 bytes
-payload.writeUInt32BE(0xFFFFFFFF, 8); // Device ID wildcard
+payload.writeUInt8(0x01, 0);             // HDHOMERUN_TAG_DEVICE_TYPE
+payload.writeUInt8(0x04, 1);             // Length: 4 bytes
+payload.writeUInt32BE(0xFFFFFFFF, 2);    // Device type wildcard
+payload.writeUInt8(0x02, 6);             // HDHOMERUN_TAG_DEVICE_ID  
+payload.writeUInt8(0x04, 7);             // Length: 4 bytes
+payload.writeUInt32BE(0xFFFFFFFF, 8);    // Device ID wildcard
 
 const header = Buffer.alloc(4);
-header.writeUInt16BE(0x0002, 0);    // HDHOMERUN_TYPE_DISCOVER_REQ
+header.writeUInt16BE(0x0002, 0);         // HDHOMERUN_TYPE_DISCOVER_REQ
 header.writeUInt16BE(payload.length, 2); // Payload length
 
 // Calculate CRC32 and append
@@ -125,11 +126,11 @@ All HTTP endpoints use the device's IP address discovered via UDP protocol.
   "DeviceID": "10AA5474",
   "DeviceAuth": "3KFU8ZYZnKADs5SHUXWWuqLb",
   "UpgradeAvailable": "20250815",
-  "BaseURL": "http://10.30.2.237",
-  "LineupURL": "http://10.30.2.237/lineup.json",
+  "BaseURL": "http://192.168.0.37",
+  "LineupURL": "http://192.168.0.37/lineup.json",
   "TunerCount": 4,
-  "StorageID": "10AA5474-13D8-41FA-940C-1F9D2D5D9F8D",
-  "StorageURL": "http://10.30.2.237/recorded_files.json",
+  "StorageID": "10AA5474-13D8-41AF-940C-1F9D2D5D9F8D",
+  "StorageURL": "http://192.168.0.37/recorded_files.json",
   "TotalSpace": 2000000000000,
   "FreeSpace": 1500000000000
 }
@@ -155,7 +156,7 @@ All HTTP endpoints use the device's IP address discovered via UDP protocol.
     "HD": 1,
     "SignalStrength": 100,
     "SignalQuality": 74,
-    "URL": "http://10.30.2.237:5004/auto/v2.1"
+    "URL": "http://192.168.0.37:5004/auto/v2.1"
   }
 ]
 ```
@@ -209,7 +210,7 @@ To detect DVR storage capability, check for:
     "Category": "sport", 
     "ImageURL": "https://img.hdhomerun.com/titles/C28817988ENAQAO.jpg",
     "StartTime": 1744567200,
-    "EpisodesURL": "http://10.30.2.237/recorded_files.json?SeriesID=C28817988ENAQAO",
+    "EpisodesURL": "http://192.168.0.37/recorded_files.json?SeriesID=C28817988ENAQAO",
     "UpdateID": 2660457045
   }
 ]
@@ -249,8 +250,8 @@ To detect DVR storage capability, check for:
     "Synopsis": "Rory McIlroy tries to complete the career grand slam...",
     "Title": "2025 Masters Tournament",
     "Filename": "2025 Masters Tournament 20250413 [20250413-1800].mpg",
-    "PlayURL": "http://10.30.2.237/recorded/play?id=a63ec6a9404b10f9",
-    "CmdURL": "http://10.30.2.237/recorded/cmd?id=a63ec6a9404b10f9"
+    "PlayURL": "http://192.168.0.37/recorded/play?id=a63ec6a9404b10f9",
+    "CmdURL": "http://192.168.0.37/recorded/cmd?id=a63ec6a9404b10f9"
   }
 ]
 ```
@@ -269,6 +270,90 @@ To detect DVR storage capability, check for:
 - `/api/episodes` - Alternative episodes endpoint (often unavailable)
 
 Most HDHomeRun DVR devices focus on playback rather than rule management via API.
+
+## Updating DVR Content
+
+### Playback Progress Management
+
+HDHomeRun devices support updating playback progress (resume position) via an undocumented HTTP API. This was discovered through network traffic analysis (`tcpdump`) of official HDHomeRun applications.
+
+#### Update Resume Position
+
+**Endpoint**: `/recorded/cmd`
+**Method**: POST
+**Format**: Query parameters (not form data or JSON)
+
+**Request Format**:
+```
+POST /recorded/cmd?id={episode_id}&cmd=set&Resume={position}
+```
+
+**Parameters**:
+- `id`: Episode ID from the `CmdURL` field
+- `cmd`: Command type (use `set` for updating progress)
+- `Resume`: Position in seconds, or special value for watched status
+
+**Special Resume Values**:
+- `4294967295` (max uint32): Marks episode as "watched/completed"
+- `0`: Resets to beginning
+- Any other positive integer: Resume position in seconds
+
+**Response**:
+- Success: `200 OK` with empty body
+- Failure: `400 Bad Request` with HTML error page
+
+**Examples**:
+
+Set resume position to 682 seconds:
+```bash
+curl -X POST "http://192.168.0.37/recorded/cmd?id=901f4f1362e3b3a8&cmd=set&Resume=682"
+```
+
+Mark episode as watched:
+```bash
+curl -X POST "http://192.168.0.37/recorded/cmd?id=901f4f1362e3b3a8&cmd=set&Resume=4294967295"
+```
+
+JavaScript/Node.js example:
+```javascript
+const axios = require('axios');
+
+async function updateProgress(cmdUrl, position, watched) {
+  const resumeValue = watched ? '4294967295' : position.toString();
+  const url = `${cmdUrl}&cmd=set&Resume=${resumeValue}`;
+
+  try {
+    const response = await axios.post(url, null, { timeout: 5000 });
+    return { success: true, status: response.status };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Usage
+await updateProgress(
+  'http://192.168.0.37/recorded/cmd?id=901f4f1362e3b3a8',
+  682,    // position in seconds
+  false   // watched status
+);
+```
+
+**Important Notes**:
+- This API is **undocumented** and not officially supported by SiliconDust
+- The `cmd=set` parameter is **required** in the query string
+- `Resume` must be a **query parameter**, not form data or JSON body
+- The request body should be null/empty
+- May not work on all device models or firmware versions
+- Discovered via `tcpdump` analysis of official app traffic
+
+**Discovery Method**:
+```bash
+# Capture traffic while using official HDHomeRun app
+sudo tcpdump -i any -A host {device_ip} and port 80
+
+# Look for POST requests to /recorded/cmd
+# Extract the query parameter format
+```
 
 ## Implementation Guide
 
