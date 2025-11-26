@@ -58,13 +58,14 @@ class HDHomeRunServer {
 
       // Prepare form data
       // HDHomeRun uses 'Resume' (capital R) as the parameter name
-      // Special value 4294967295 (max uint32) indicates "watched"
+      // Always send position first, then append special value 4294967295 if watched
       const formData = new URLSearchParams();
+      formData.append('Resume', position.toString());
 
       if (watched) {
+        // If watched is true, append Resume again with special value (max uint32 = watched)
+        // This sends both values: Resume=position&Resume=4294967295
         formData.append('Resume', '4294967295');
-      } else {
-        formData.append('Resume', position.toString());
       }
 
       const response = await axios.post(cmdUrl, formData, {
@@ -75,7 +76,7 @@ class HDHomeRunServer {
       });
 
       this.debug(`HDHomeRun progress relay response: ${response.status}`);
-      this.log(`✓ Progress synced to HDHomeRun device (Resume: ${watched ? '4294967295 (watched)' : position})`);
+      this.log(`✓ Progress synced to HDHomeRun device (Resume: ${watched ? position + ' + 4294967295 (watched)' : position})`);
       return { success: true, status: response.status };
     } catch (error) {
       // Log error but don't throw - this is best-effort since API isn't officially documented
