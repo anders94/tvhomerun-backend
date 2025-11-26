@@ -10,7 +10,9 @@
     "pre-cache": "node src/server.js --pre-cache",
     "dev:pre-cache": "node src/server.js --verbose --pre-cache",
     "scan": "node src/index.js",
-    "device-progress": "node src/device-progress.js"
+    "progress": "node src/progress.js",
+    "device-progress": "node src/device-progress.js",
+    "compare-progress": "node src/compare-progress.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
