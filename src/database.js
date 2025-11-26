@@ -550,12 +550,13 @@ class HDHomeRunDatabase {
 
   async getSeriesById(seriesId) {
     const series = await db.run(`
-      SELECT 
+      SELECT
         s.id,
         s.series_id,
         s.title,
         s.category,
         s.image_url,
+        s.episodes_url,
         s.episode_count,
         s.total_duration,
         s.first_recorded,
@@ -569,13 +570,13 @@ class HDHomeRunDatabase {
       JOIN devices d ON s.device_id = d.id
       WHERE s.id = ? OR s.series_id = ?
     `, [seriesId, seriesId]);
-    
+
     return series && series.length > 0 ? series[0] : null;
   }
 
   async getEpisodesBySeriesId(seriesId) {
     const episodes = await db.run(`
-      SELECT 
+      SELECT
         e.id,
         e.program_id,
         e.title,
@@ -599,8 +600,8 @@ class HDHomeRunDatabase {
         e.file_size,
         e.play_url,
         e.cmd_url,
-        e.resume_position,
-        e.watched,
+        COALESCE(e.resume_position, 0) as resume_position,
+        COALESCE(e.watched, 0) as watched,
         e.record_success,
         e.image_url,
         e.created_at,
@@ -612,7 +613,7 @@ class HDHomeRunDatabase {
       WHERE s.id = ? OR s.series_id = ?
       ORDER BY e.start_time DESC
     `, [seriesId, seriesId]);
-    
+
     return episodes || [];
   }
 
@@ -639,8 +640,8 @@ class HDHomeRunDatabase {
         e.file_size,
         e.play_url,
         e.cmd_url,
-        e.resume_position,
-        e.watched,
+        COALESCE(e.resume_position, 0) as resume_position,
+        COALESCE(e.watched, 0) as watched,
         e.record_success,
         e.image_url,
         e.created_at,
@@ -679,8 +680,8 @@ class HDHomeRunDatabase {
         e.duration,
         e.filename,
         e.play_url,
-        e.resume_position,
-        e.watched,
+        COALESCE(e.resume_position, 0) as resume_position,
+        COALESCE(e.watched, 0) as watched,
         e.created_at,
         s.series_id,
         s.title as series_title,
@@ -716,8 +717,8 @@ class HDHomeRunDatabase {
         e.filename,
         e.play_url,
         e.cmd_url,
-        e.resume_position,
-        e.watched,
+        COALESCE(e.resume_position, 0) as resume_position,
+        COALESCE(e.watched, 0) as watched,
         e.created_at,
         s.series_id,
         s.title as series_title,

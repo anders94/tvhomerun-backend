@@ -9,7 +9,8 @@
     "debug": "node src/server.js --verbose",
     "pre-cache": "node src/server.js --pre-cache",
     "dev:pre-cache": "node src/server.js --verbose --pre-cache",
-    "scan": "node src/index.js"
+    "scan": "node src/index.js",
+    "device-progress": "node src/device-progress.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
