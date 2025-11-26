@@ -51,16 +51,21 @@ class HDHomeRunServer {
 
   async relayProgressToHDHomeRun(cmdUrl, position, watched) {
     // Attempt to relay progress to HDHomeRun's CmdURL endpoint
-    // This is experimental as the resume/progress API is not officially documented
+    // This uses undocumented APIs and may not work on all devices/firmware versions
 
     try {
       this.debug(`Attempting to relay progress to HDHomeRun: ${cmdUrl}`);
 
-      // Try sending progress as form data (common for POST endpoints)
+      // Prepare form data
+      // HDHomeRun uses 'Resume' (capital R) as the parameter name
+      // Special value 4294967295 (max uint32) indicates "watched"
       const formData = new URLSearchParams();
-      formData.append('position', position.toString());
-      formData.append('watched', watched ? '1' : '0');
-      formData.append('resume', position.toString());
+
+      if (watched) {
+        formData.append('Resume', '4294967295');
+      } else {
+        formData.append('Resume', position.toString());
+      }
 
       const response = await axios.post(cmdUrl, formData, {
         headers: {
@@ -70,11 +75,17 @@ class HDHomeRunServer {
       });
 
       this.debug(`HDHomeRun progress relay response: ${response.status}`);
-      return response.data;
+      this.log(`✓ Progress synced to HDHomeRun device (Resume: ${watched ? '4294967295 (watched)' : position})`);
+      return { success: true, status: response.status };
     } catch (error) {
-      // Don't throw - this is best-effort since API isn't documented
-      this.debug(`HDHomeRun progress relay failed (expected): ${error.message}`);
-      return null;
+      // Log error but don't throw - this is best-effort since API isn't officially documented
+      if (error.response) {
+        this.debug(`HDHomeRun progress relay failed: ${error.response.status} ${error.response.statusText}`);
+      } else {
+        this.debug(`HDHomeRun progress relay failed: ${error.message}`);
+      }
+      this.log(`⚠️  Warning: Could not sync progress to HDHomeRun device: ${error.message}`);
+      return { success: false, error: error.message };
     }
   }
 
@@ -334,12 +345,13 @@ class HDHomeRunServer {
 
         this.debug(`Updated progress for episode ${id}: position=${position}s, watched=${watched}`);
 
-        // Attempt to relay progress to HDHomeRun (experimental)
-        // Note: This may not work as the API isn't officially documented
+        // Attempt to relay progress to HDHomeRun
+        // Note: This uses undocumented APIs and may not work on all devices/firmware versions
+        let deviceSyncResult = null;
         if (episode.cmd_url) {
-          this.relayProgressToHDHomeRun(episode.cmd_url, position, watched).catch(error => {
-            this.debug(`Failed to relay progress to HDHomeRun: ${error.message}`);
-          });
+          deviceSyncResult = await this.relayProgressToHDHomeRun(episode.cmd_url, position, watched);
+        } else {
+          this.debug('Episode has no cmd_url, skipping device sync');
         }
 
         const formattedEpisode = this.formatEpisodeWithHLS(updatedEpisode, req);
@@ -352,6 +364,15 @@ class HDHomeRunServer {
             end_time: new Date(updatedEpisode.end_time * 1000).toISOString(),
             duration_minutes: Math.round((updatedEpisode.duration || 0) / 60),
             resume_minutes: Math.round((updatedEpisode.resume_position || 0) / 60)
+          },
+          deviceSync: deviceSyncResult ? {
+            attempted: true,
+            success: deviceSyncResult.success,
+            error: deviceSyncResult.error || null
+          } : {
+            attempted: false,
+            success: false,
+            error: 'Episode has no command URL'
           }
         });
       } catch (error) {
