@@ -355,6 +355,79 @@ sudo tcpdump -i any -A host {device_ip} and port 80
 # Extract the query parameter format
 ```
 
+### Delete Recording
+
+HDHomeRun devices support deleting recordings via the command endpoint.
+
+**Endpoint**: `/recorded/cmd`
+**Method**: POST
+**Format**: Query parameters
+
+**Request Format**:
+```
+POST /recorded/cmd?id={episode_id}&cmd=delete&rerecord={0|1}
+```
+
+**Parameters**:
+- `id`: Episode ID from the `CmdURL` field
+- `cmd`: Command type (use `delete` for deletion)
+- `rerecord`: Whether to allow re-recording (0 = no, 1 = yes)
+
+**Response**:
+- Success: `200 OK` with empty body
+- Failure: `400 Bad Request` with HTML error page
+
+**Examples**:
+
+Delete recording without allowing re-record:
+```bash
+curl -X POST "http://192.168.0.37/recorded/cmd?id=5b46d1de54f373bf&cmd=delete&rerecord=0"
+```
+
+Delete recording and allow it to be re-recorded:
+```bash
+curl -X POST "http://192.168.0.37/recorded/cmd?id=5b46d1de54f373bf&cmd=delete&rerecord=1"
+```
+
+JavaScript/Node.js example:
+```javascript
+const axios = require('axios');
+
+async function deleteRecording(cmdUrl, allowRerecord = false) {
+  const url = `${cmdUrl}&cmd=delete&rerecord=${allowRerecord ? '1' : '0'}`;
+
+  try {
+    const response = await axios.post(url, null, { timeout: 5000 });
+    return { success: true, status: response.status };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Usage
+await deleteRecording(
+  'http://192.168.0.37/recorded/cmd?id=5b46d1de54f373bf',
+  false  // rerecord flag
+);
+```
+
+**Important Notes**:
+- Deletion is **permanent** and cannot be undone
+- The `rerecord` parameter controls whether the same program can be recorded again
+- Setting `rerecord=1` removes the recording but allows future airings to be recorded
+- Setting `rerecord=0` prevents the program from being recorded again (useful for unwanted recordings)
+
+### Other Command Types
+
+The `cmd` parameter may support other operations, though these are untested:
+
+**Potential Commands** (unverified):
+- `cmd=protect` - Protect from deletion?
+- `cmd=rename` - Rename recording?
+- `cmd=move` - Move to different storage?
+
+These would require additional network traffic analysis to confirm.
+
 ## Implementation Guide
 
 ### Basic Implementation Flow

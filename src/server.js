@@ -85,6 +85,36 @@ class HDHomeRunServer {
     }
   }
 
+  async deleteRecordingFromHDHomeRun(cmdUrl, rerecord = false) {
+    // Delete recording from HDHomeRun device
+    // Format: POST /recorded/cmd?id={id}&cmd=delete&rerecord={0|1}
+
+    try {
+      this.log(`Attempting to delete recording from HDHomeRun:`);
+      this.log(`  URL: ${cmdUrl}`);
+      this.log(`  Rerecord: ${rerecord}`);
+
+      const url = `${cmdUrl}&cmd=delete&rerecord=${rerecord ? '1' : '0'}`;
+      this.log(`  Request URL: ${url}`);
+
+      const response = await axios.post(url, null, {
+        timeout: 5000
+      });
+
+      this.log(`✓ Recording deleted from HDHomeRun device`);
+      return { success: true, status: response.status };
+    } catch (error) {
+      this.log(`✗ HDHomeRun device deletion failed:`);
+      if (error.response) {
+        this.log(`  Status: ${error.response.status} ${error.response.statusText}`);
+        this.log(`  Response data: ${JSON.stringify(error.response.data)}`);
+      } else {
+        this.log(`  Error: ${error.message}`);
+      }
+      throw new Error(`Failed to delete recording from device: ${error.message}`);
+    }
+  }
+
   setupMiddleware() {
     this.app.use(cors());
     this.app.use(express.json());
@@ -375,6 +405,87 @@ class HDHomeRunServer {
       } catch (error) {
         this.log(`Error updating progress for episode ${req.params.id}: ${error.message}`);
         res.status(500).json({ error: 'Failed to update progress' });
+      }
+    });
+
+    // Delete episode
+    this.app.delete('/api/episodes/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { rerecord = false } = req.query;
+
+        // Get episode to check if it exists and get cmd_url
+        const episode = await this.database.getEpisodeById(id);
+        if (!episode) {
+          return res.status(404).json({ error: 'Episode not found' });
+        }
+
+        this.log(`Deleting episode ${id}: ${episode.series_title} - ${episode.episode_title}`);
+
+        // Step 1: Delete from HDHomeRun device
+        let deviceDeletionResult = null;
+        if (episode.cmd_url) {
+          try {
+            deviceDeletionResult = await this.deleteRecordingFromHDHomeRun(episode.cmd_url, rerecord);
+            this.log(`✓ Episode deleted from HDHomeRun device`);
+          } catch (error) {
+            this.log(`✗ Failed to delete from device: ${error.message}`);
+            return res.status(500).json({
+              error: 'Failed to delete recording from HDHomeRun device',
+              details: error.message,
+              deviceDeletion: { success: false, error: error.message }
+            });
+          }
+        } else {
+          this.log(`⚠️  Episode has no cmd_url, skipping device deletion`);
+        }
+
+        // Step 2: Delete HLS cache directory
+        const hlsCacheDir = path.join(this.hlsManager.cacheDir, String(id));
+        let hlsDeletionResult = { attempted: false, success: false };
+
+        if (fs.existsSync(hlsCacheDir)) {
+          try {
+            this.log(`Deleting HLS cache directory: ${hlsCacheDir}`);
+            fs.rmSync(hlsCacheDir, { recursive: true, force: true });
+            hlsDeletionResult = { attempted: true, success: true };
+            this.log(`✓ HLS cache deleted`);
+          } catch (error) {
+            this.log(`✗ Failed to delete HLS cache: ${error.message}`);
+            hlsDeletionResult = { attempted: true, success: false, error: error.message };
+          }
+        } else {
+          this.log(`HLS cache directory does not exist: ${hlsCacheDir}`);
+        }
+
+        // Step 3: Delete from local database
+        try {
+          await this.database.deleteEpisode(id);
+          this.log(`✓ Episode deleted from local database`);
+        } catch (error) {
+          this.log(`✗ Failed to delete from database: ${error.message}`);
+          return res.status(500).json({
+            error: 'Failed to delete episode from database',
+            details: error.message,
+            deviceDeletion: deviceDeletionResult,
+            hlsDeletion: hlsDeletionResult
+          });
+        }
+
+        res.json({
+          success: true,
+          message: 'Episode deleted successfully',
+          episode: {
+            id: episode.id,
+            series_title: episode.series_title,
+            episode_title: episode.episode_title
+          },
+          deviceDeletion: deviceDeletionResult || { attempted: false, success: false },
+          hlsDeletion: hlsDeletionResult
+        });
+      } catch (error) {
+        this.log(`Error deleting episode ${req.params.id}: ${error.message}`);
+        res.status(500).json({ error: 'Failed to delete episode' });
       }
     });
 

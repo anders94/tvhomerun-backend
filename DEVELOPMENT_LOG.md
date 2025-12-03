@@ -79,6 +79,78 @@ await axios.post(url, null, { timeout: 5000 });
 
 ---
 
+## 2025-11-26: HDHomeRun Recording Deletion API
+
+### Problem
+Need to delete recordings from HDHomeRun devices via HTTP API and clean up associated resources.
+
+### Solution
+
+**Correct API Format:**
+```
+POST /recorded/cmd?id={episode_id}&cmd=delete&rerecord={0|1}
+```
+
+**Parameters:**
+- `cmd=delete`: Command to delete recording
+- `rerecord`: Controls whether program can be recorded again
+  - `rerecord=0`: Prevents re-recording (for unwanted content)
+  - `rerecord=1`: Allows re-recording of future airings
+
+**Implementation Strategy:**
+1. Delete from HDHomeRun device first (fail fast if device deletion fails)
+2. Delete HLS cache directory if it exists
+3. Remove from local database (triggers update series statistics)
+
+**API Endpoint:**
+```
+DELETE /api/episodes/:id?rerecord=0
+```
+
+**Files Updated:**
+1. `src/server.js`: Added `deleteRecordingFromHDHomeRun()` and DELETE endpoint
+2. `src/database.js`: Added `deleteEpisode()` method
+3. `HDHOMERUN_PROTOCOL.md`: Documented delete command
+
+**Response Format:**
+```json
+{
+  "success": true,
+  "message": "Episode deleted successfully",
+  "episode": {
+    "id": 135,
+    "series_title": "Show Name",
+    "episode_title": "Episode Name"
+  },
+  "deviceDeletion": {
+    "success": true,
+    "status": 200
+  },
+  "hlsDeletion": {
+    "attempted": true,
+    "success": true
+  }
+}
+```
+
+### Design Decisions
+
+**Device Deletion First:**
+- Fail fast if device deletion fails
+- Prevents orphaned local data if device rejects deletion
+- User retains episode info if deletion fails
+
+**HLS Cache Cleanup:**
+- Best effort deletion
+- Logs warnings if cleanup fails
+- Doesn't block database deletion
+
+**Database Triggers:**
+- DELETE trigger automatically updates series `episode_count`
+- Maintains data integrity without application code
+
+---
+
 ## API Endpoint Discovery Reference
 
 ### Useful Debugging Techniques
@@ -150,6 +222,11 @@ POST http://{device_ip}/recorded/cmd?id={episode_id}&cmd=set&Resume={position}
 **Mark as Watched:**
 ```
 POST http://{device_ip}/recorded/cmd?id={episode_id}&cmd=set&Resume=4294967295
+```
+
+**Delete Recording:**
+```
+POST http://{device_ip}/recorded/cmd?id={episode_id}&cmd=delete&rerecord={0|1}
 ```
 
 ### Unknown/Untested
@@ -287,6 +364,18 @@ node src/device-progress.js set 135 1234
 curl -X PUT http://localhost:3000/api/episodes/135/progress \
   -H "Content-Type: application/json" \
   -d '{"position": 1234, "watched": false}'
+```
+
+**Test episode deletion:**
+```bash
+# Via API (delete without allowing re-record)
+curl -X DELETE http://localhost:3000/api/episodes/135
+
+# Via API (delete and allow re-record)
+curl -X DELETE "http://localhost:3000/api/episodes/135?rerecord=true"
+
+# Direct to device
+curl -X POST "http://192.168.0.37/recorded/cmd?id=5b46d1de54f373bf&cmd=delete&rerecord=0"
 ```
 
 **Compare all episodes:**

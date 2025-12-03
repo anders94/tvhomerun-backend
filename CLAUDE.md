@@ -101,6 +101,7 @@ npm run scan           # Run original CLI discovery tool
 - `GET /api/episodes/recent` - Recently added episodes across all shows
 - `GET /api/episodes/:id` - Get specific episode details
 - `PUT /api/episodes/:id/progress` - Update episode playback progress
+- `DELETE /api/episodes/:id` - Delete episode from device, cache, and database
 
 ### HLS Streaming
 - `GET /api/stream/:episodeId/playlist.m3u8` - Get HLS playlist for episode (initiates transcode if needed)
@@ -109,6 +110,20 @@ npm run scan           # Run original CLI discovery tool
 
 ### Discovery
 - `POST /api/discover` - Manual discovery trigger (returns immediately, runs in background)
+
+## Deletion Workflow
+
+When deleting an episode via `DELETE /api/episodes/:id?rerecord=0`:
+
+1. **HDHomeRun Device Deletion** - Recording is deleted from the device using the undocumented `cmd=delete` API
+2. **HLS Cache Cleanup** - The transcoded HLS files and directory are removed from `hls-cache/{episodeId}/`
+3. **Database Removal** - Episode is deleted from the local SQLite database (triggers update series statistics)
+
+Query Parameters:
+- `rerecord=false` (default): Prevents the program from being recorded again
+- `rerecord=true`: Allows the same program to be recorded in future airings
+
+The deletion fails fast - if the device deletion fails, the HLS cache and database are not modified.
 
 ## Data Flow
 

@@ -898,6 +898,14 @@ class HDHomeRunDatabase {
     console.log('Series statistics recalculated successfully');
   }
 
+  async deleteEpisode(episodeId) {
+    // Delete an episode from the database
+    // Note: Triggers will automatically update series statistics
+    await db.run(`DELETE FROM episodes WHERE id = ?`, [episodeId]);
+    console.log(`Episode ${episodeId} deleted from database`);
+    return true;
+  }
+
   async close() {
     if (this.isOpen) {
       await db.close();
