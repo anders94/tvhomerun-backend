@@ -8,10 +8,13 @@ This is a backend server for TVHomeRun apps including [TVHomeRun tvOS](https://g
 - **DVR Content Management**: Access recorded shows, episodes, and metadata from HDHomeRun DVR devices
 - **REST API**: Clean JSON endpoints for integration with web apps, mobile apps, or home automation systems
 - **HLS Proxy**: Automatically creates HLS versions of episodes supporting native playback on Apple devices
+- **Playback Progress Sync**: Track and sync playback position between local database and HDHomeRun devices
+- **Recording Deletion**: Delete recordings from devices with automatic cache and database cleanup
 - **Periodic Sync**: Automatic hourly discovery to keep content up-to-date
 - **SQLite Database**: Local storage for offline browsing and fast queries
 - **Search & Filter**: Find shows by title, category, or other criteria
 - **CORS Enabled**: Ready for browser-based applications
+- **Command Line Tools**: Manage progress and compare sync status between device and database
 
 ## Prerequisites
 
@@ -61,6 +64,24 @@ PORT=8080 npm start
 ```bash
 # Run the CLI discovery tool
 npm run scan
+```
+
+### Command Line Tools
+
+```bash
+# Manage playback progress (local database)
+npm run progress get 123           # Get progress for episode
+npm run progress set 123 1800      # Set position to 1800 seconds
+npm run progress list --in-progress # List episodes in progress
+
+# Manage device progress (with HDHomeRun sync)
+npm run device-progress get 123    # Compare database vs device
+npm run device-progress set 123 1800  # Set on both device and database
+npm run device-progress sync 123   # Sync database from device
+
+# Compare all episodes
+npm run compare-progress                # Compare all episodes
+npm run compare-progress --sync-mismatched  # Sync mismatches from device
 ```
 
 ### Command Line Options
@@ -244,6 +265,91 @@ Response:
 ]
 ```
 
+#### Get Specific Episode
+```bash
+curl http://localhost:3000/api/episodes/123
+```
+
+Response:
+```json
+{
+  "id": 123,
+  "series_title": "Celebrity Jeopardy!",
+  "episode_title": "Quarterfinal #7",
+  "episode_number": "S03E07",
+  "duration": 3600,
+  "resume_position": 1800,
+  "watched": false,
+  "play_url": "http://...",
+  "hls_url": "http://localhost:3000/api/stream/123/playlist.m3u8"
+}
+```
+
+#### Update Playback Progress
+```bash
+curl -X PUT http://localhost:3000/api/episodes/123/progress \
+  -H "Content-Type: application/json" \
+  -d '{"position": 1800, "watched": false}'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "episode": {
+    "id": 123,
+    "resume_position": 1800,
+    "watched": false
+  },
+  "deviceSync": {
+    "attempted": true,
+    "success": true,
+    "error": null
+  }
+}
+```
+
+**Note**: Progress updates are synced to both the local database and the HDHomeRun device. If device sync fails, the local database is still updated and a warning is logged.
+
+#### Delete Episode
+```bash
+# Delete without allowing re-record
+curl -X DELETE http://localhost:3000/api/episodes/123
+
+# Delete and allow re-recording
+curl -X DELETE "http://localhost:3000/api/episodes/123?rerecord=true"
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Episode deleted successfully",
+  "episode": {
+    "id": 123,
+    "series_title": "Celebrity Jeopardy!",
+    "episode_title": "Quarterfinal #7"
+  },
+  "deviceDeletion": {
+    "success": true,
+    "status": 200
+  },
+  "hlsDeletion": {
+    "attempted": true,
+    "success": true
+  }
+}
+```
+
+**Deletion Workflow**:
+1. Recording is deleted from HDHomeRun device (fails fast if this fails)
+2. HLS cache directory is removed (`hls-cache/{episodeId}/`)
+3. Episode is removed from local database (triggers update series statistics)
+
+**Query Parameters**:
+- `rerecord=false` (default): Prevents the program from being recorded again
+- `rerecord=true`: Allows the same program to be recorded in future airings
+
 ### Discovery
 
 #### Trigger Manual Discovery
@@ -315,14 +421,19 @@ npm run dev
 ```
 tvhomerun-backend/
 ├── src/
-│   ├── server.js       # Main API server
-│   ├── index.js        # CLI discovery tool
-│   ├── discovery.js    # Device discovery
-│   ├── dvr.js          # DVR content management
-│   └── database.js     # SQLite operations
-├── schema.sql          # Database schema
-├── CLAUDE.md           # Development guidelines
-├── HDHOMERUN_PROTOCOL.md  # Protocol documentation
+│   ├── server.js           # Main API server
+│   ├── index.js            # CLI discovery tool
+│   ├── discovery.js        # Device discovery
+│   ├── dvr.js              # DVR content management
+│   ├── database.js         # SQLite operations
+│   ├── hls-stream.js       # HLS transcoding manager
+│   ├── progress.js         # Progress management tool (local DB)
+│   ├── device-progress.js  # Progress management tool (with device sync)
+│   └── compare-progress.js # Batch progress comparison tool
+├── schema.sql              # Database schema
+├── CLAUDE.md               # Development guidelines
+├── HDHOMERUN_PROTOCOL.md   # Protocol documentation
+├── DEVELOPMENT_LOG.md      # Development discoveries and notes
 ├── package.json
 └── README.md
 ```
@@ -398,6 +509,66 @@ sensor:
     scan_interval: 3600
 ```
 
+## Advanced Features
+
+### HDHomeRun Device Sync
+
+The server automatically syncs playback progress with HDHomeRun devices using undocumented APIs discovered through network traffic analysis. This ensures that progress tracking works across the native HDHomeRun apps and this backend.
+
+**What's Synced**:
+- Playback position (resume point)
+- Watched status
+- Recording deletion
+
+**How It Works**:
+- Uses `POST /recorded/cmd?id={id}&cmd=set&Resume={position}` for progress updates
+- Uses `POST /recorded/cmd?id={id}&cmd=delete&rerecord={0|1}` for deletions
+- Special value `4294967295` indicates "watched/completed"
+
+See `HDHOMERUN_PROTOCOL.md` for complete technical details.
+
+### Progress Comparison Tool
+
+Compare playback progress between local database and HDHomeRun devices for all episodes:
+
+```bash
+# Compare all episodes
+npm run compare-progress
+
+# Compare and automatically sync mismatches
+npm run compare-progress --sync-mismatched
+
+# Verbose output
+npm run compare-progress --verbose
+```
+
+**Output Example**:
+```
+ID     Series                         Episode                        Status
+--------------------------------------------------------------------------------------------------------------
+123    Celebrity Jeopardy!            Quarterfinal #7                ✓ IN SYNC
+5      All Creatures Great and Small  Homecoming                     ✗ OUT OF SYNC (DB: 30:00, Device: 45:00)
+```
+
+### HLS Transcoding
+
+Episodes are automatically converted to HLS format for streaming. The server supports two modes:
+
+**On-Demand Mode** (default):
+- Episodes are converted when first requested
+- Saves storage space
+- May have delay on first playback
+
+**Pre-Cache Mode** (`--pre-cache`):
+- All episodes converted after discovery
+- Faster playback startup
+- Requires more storage space
+
+**Cache Management**:
+- Transcoded files stored in `hls-cache/{episodeId}/`
+- Each cache includes `transcode.json` with metadata (show name, episode title, air date)
+- Old cache cleaned up automatically (30 days default)
+
 ## Troubleshooting
 
 ### No Devices Found
@@ -418,6 +589,20 @@ sensor:
 1. Verify server is running: `curl http://localhost:3000/health`
 2. Check CORS settings if accessing from browser
 3. Ensure port is not blocked by firewall
+
+### Progress Sync Issues
+
+1. Check that episodes have `cmd_url` field: `node src/device-progress.js get {id}`
+2. Verify device is reachable: `curl http://{device_ip}/discover.json`
+3. Check server logs for sync errors
+4. Use compare tool to identify sync problems: `npm run compare-progress`
+
+### Deletion Issues
+
+1. Ensure device is online before deleting
+2. Check that episode has `cmd_url` field
+3. HLS cache deletion is best-effort and won't block database deletion
+4. Series statistics automatically update via database triggers
 
 ## Contributing
 
