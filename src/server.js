@@ -38,12 +38,46 @@ class HDHomeRunServer {
     }
   }
 
+  getDirectorySize(dirPath) {
+    // Calculate total size of directory and all its contents
+    // Returns size in bytes, or 0 if directory doesn't exist
+    try {
+      if (!fs.existsSync(dirPath)) {
+        return 0;
+      }
+
+      let totalSize = 0;
+      const files = fs.readdirSync(dirPath);
+
+      for (const file of files) {
+        const filePath = path.join(dirPath, file);
+        const stats = fs.statSync(filePath);
+
+        if (stats.isDirectory()) {
+          totalSize += this.getDirectorySize(filePath);
+        } else {
+          totalSize += stats.size;
+        }
+      }
+
+      return totalSize;
+    } catch (error) {
+      this.debug(`Error calculating directory size for ${dirPath}: ${error.message}`);
+      return 0;
+    }
+  }
+
   formatEpisodeWithHLS(episode, req) {
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const hlsUrl = `${baseUrl}/api/stream/${episode.id}/playlist.m3u8`;
 
+    // Calculate HLS cache size from filesystem
+    const hlsCacheDir = path.join(this.hlsManager.cacheDir, String(episode.id));
+    const hlsCacheSize = this.getDirectorySize(hlsCacheDir);
+
     return {
       ...episode,
+      hls_cache_bytes: hlsCacheSize,
       source_url: episode.play_url,  // Keep original HDHomeRun URL
       play_url: hlsUrl                // Replace with HLS proxy URL
     };

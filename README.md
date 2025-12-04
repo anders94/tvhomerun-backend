@@ -228,7 +228,9 @@ Response:
     "end_time": 1735606800,
     "duration": 3600,
     "filename": "All Creatures Great and Small on Masterpiece S05E07.mpg",
-    "play_url": "http://192.168.1.100:80/...",
+    "play_url": "http://localhost:3000/api/stream/42/playlist.m3u8",
+    "source_url": "http://192.168.1.100:80/...",
+    "hls_cache_bytes": 523456789,
     "watched": false,
     "resume_position": 0,
     "created_at": "2025-01-01T10:00:00.000Z"
@@ -280,10 +282,13 @@ Response:
   "duration": 3600,
   "resume_position": 1800,
   "watched": false,
-  "play_url": "http://...",
-  "hls_url": "http://localhost:3000/api/stream/123/playlist.m3u8"
+  "play_url": "http://localhost:3000/api/stream/123/playlist.m3u8",
+  "source_url": "http://192.168.0.37/recorded/play?id=...",
+  "hls_cache_bytes": 1234567890
 }
 ```
+
+**Note**: `hls_cache_bytes` shows the disk space in bytes used by the HLS transcoded cache for this episode. Returns 0 if no cache exists. This is calculated directly from the filesystem (equivalent to `du -s hls-cache/{id}`).
 
 #### Update Playback Progress
 ```bash

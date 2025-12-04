@@ -151,6 +151,44 @@ DELETE /api/episodes/:id?rerecord=0
 
 ---
 
+## 2025-11-26: HLS Cache Size Reporting
+
+### Problem
+Need to show how much disk space is used by HLS transcoded cache for each episode.
+
+### Solution
+
+**Implementation:**
+Added `hls_cache_bytes` field to all episode responses that shows the total disk space in bytes used by the HLS cache directory for that episode.
+
+**How It Works:**
+- Calculates size by recursively reading the filesystem (like `du -s hls-cache/{id}`)
+- Returns 0 if cache directory doesn't exist
+- Filesystem is always the source of truth
+- No database storage - calculated on each request
+
+**Code Changes:**
+1. `src/server.js`: Added `getDirectorySize()` helper method
+2. `src/server.js`: Updated `formatEpisodeWithHLS()` to include cache size
+
+**Response Format:**
+```json
+{
+  "id": 123,
+  "title": "Episode Title",
+  "hls_cache_bytes": 1234567890,
+  "play_url": "http://localhost:3000/api/stream/123/playlist.m3u8"
+}
+```
+
+**Performance Considerations:**
+- Filesystem reads are relatively fast for directory listings
+- Size is calculated per episode in response (not cached)
+- For large episode lists, this adds minimal overhead
+- Could be optimized with caching if needed in future
+
+---
+
 ## API Endpoint Discovery Reference
 
 ### Useful Debugging Techniques
