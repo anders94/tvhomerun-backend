@@ -634,7 +634,7 @@ class HLSStreamManager {
       }
 
       // Start transcode
-      this.log(`Bulk converting episode ${episode.id}: ${episode.title}`);
+      this.log(`Bulk converting ${episode.metaData.showName} episode ${episode.id}: ${episode.title}`);
 
       try {
         await this.startTranscode(episode.id, episode.sourceUrl, true, episode.metadata);
