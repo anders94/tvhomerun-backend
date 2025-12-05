@@ -7,9 +7,11 @@ This document provides a comprehensive overview of the HDHomeRun device discover
 1. [Device Discovery Protocol](#device-discovery-protocol)
 2. [HTTP API Endpoints](#http-api-endpoints)
 3. [DVR Content Access](#dvr-content-access)
-4. [Updating DVR Content](#updating-dvr-content)
-5. [Implementation Guide](#implementation-guide)
-6. [External References](#external-references)
+4. [Recording Rules Management](#recording-rules-management)
+5. [Program Guide API](#program-guide-api)
+6. [Updating DVR Content](#updating-dvr-content)
+7. [Implementation Guide](#implementation-guide)
+8. [External References](#external-references)
 
 ## Device Discovery Protocol
 
@@ -263,13 +265,919 @@ To detect DVR storage capability, check for:
 - `StartTime`/`EndTime`: Original broadcast times
 - `OriginalAirdate`: When episode originally aired
 
-### Recording Management
+### Recording Rules Management
 
-#### Recording Rules (Limited Support)
-- `/api/recording_rules` - May return 404 on many devices
-- `/api/episodes` - Alternative episodes endpoint (often unavailable)
+HDHomeRun uses a **cloud-based architecture** for managing recording schedules. Recording rules are stored and managed through HDHomeRun's cloud API, and devices are notified to synchronize when rules change.
 
-Most HDHomeRun DVR devices focus on playback rather than rule management via API.
+#### Architecture Overview
+
+1. **Cloud API** (`api.hdhomerun.com`) - Manages recording rules
+2. **Local Device Sync** - Device endpoint to trigger rule synchronization
+3. **DeviceAuth** - Authentication token obtained from `/discover.json`
+
+#### Cloud API Base Endpoint
+
+**Base URL**: `https://api.hdhomerun.com/api/recording_rules`
+
+**Authentication**: All requests require the `DeviceAuth` parameter, which is obtained from the device's `/discover.json` endpoint.
+
+```json
+// From /discover.json
+{
+  "DeviceAuth": "3KFU8ZYZnKADs5SHUXWWuqLb",
+  ...
+}
+```
+
+#### List Recording Rules
+
+**Method**: GET
+**Endpoint**: `https://api.hdhomerun.com/api/recording_rules?DeviceAuth={auth}`
+
+**Response Format**:
+```json
+[
+  {
+    "RecordingRuleID": "7897331",
+    "SeriesID": "C18361200EN88S3",
+    "Title": "All Creatures Great and Small on Masterpiece",
+    "Synopsis": "James Alfred Wight's series of books...",
+    "ImageURL": "https://img.hdhomerun.com/titles/C18361200EN88S3.jpg",
+    "ChannelOnly": "2.1",
+    "RecentOnly": 1,
+    "Priority": 10,
+    "StartPadding": 30,
+    "EndPadding": 30
+  }
+]
+```
+
+**Response Details**:
+- Returns array of recording rules ordered by:
+  1. DateTimeOnly rules first (one-time recordings)
+  2. Series rules by priority (highest first)
+- Returns `null` if no recording rules exist
+
+#### Create Series Recording Rule
+
+**Method**: POST
+**Endpoint**: `https://api.hdhomerun.com/api/recording_rules`
+**Content-Type**: `application/x-www-form-urlencoded` or query parameters
+
+**Parameters**:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| DeviceAuth | string | Yes | Authentication token from device |
+| Cmd | string | Yes | Must be "add" |
+| SeriesID | string | Yes | Series identifier (e.g., "C18361200EN88S3") |
+| ChannelOnly | string | No | Pipe-separated channel numbers (e.g., "2.1\|4.1") |
+| TeamOnly | string | No | Pipe-separated team names (for sports) |
+| RecentOnly | bool | No | Record only new episodes (0 or 1, default: 0) |
+| AfterOriginalAirdateOnly | int64 | No | Unix timestamp - only record episodes after this date |
+| StartPadding | uint | No | Seconds before start (default: 30, max: 3600) |
+| EndPadding | uint | No | Seconds after end (default: 30, max: 10800) |
+
+**Example Request**:
+```bash
+curl -X POST "https://api.hdhomerun.com/api/recording_rules" \
+  -d "DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb" \
+  -d "Cmd=add" \
+  -d "SeriesID=C18361200EN88S3" \
+  -d "ChannelOnly=2.1" \
+  -d "RecentOnly=1" \
+  -d "StartPadding=60" \
+  -d "EndPadding=60"
+```
+
+**JavaScript Example**:
+```javascript
+const axios = require('axios');
+
+async function createSeriesRecording(deviceAuth, seriesId, options = {}) {
+  const params = new URLSearchParams({
+    DeviceAuth: deviceAuth,
+    Cmd: 'add',
+    SeriesID: seriesId,
+    ...options
+  });
+
+  const response = await axios.post(
+    'https://api.hdhomerun.com/api/recording_rules',
+    params
+  );
+
+  return response.data;
+}
+
+// Usage
+await createSeriesRecording('3KFU8ZYZnKADs5SHUXWWuqLb', 'C18361200EN88S3', {
+  ChannelOnly: '2.1',
+  RecentOnly: 1,
+  StartPadding: 60,
+  EndPadding: 60
+});
+```
+
+#### Create One-Time Recording Rule
+
+**Method**: POST
+**Endpoint**: `https://api.hdhomerun.com/api/recording_rules`
+
+One-time recordings target a specific airing of a program.
+
+**Required Parameters**:
+- `DeviceAuth` - Authentication token
+- `Cmd` - Must be "add"
+- `SeriesID` - Series identifier
+- `DateTimeOnly` - Unix timestamp of specific airing
+- `ChannelOnly` - Single channel number (required for one-time recordings)
+
+**Optional Parameters**:
+- `StartPadding` - Seconds before (default: 30, max: 3600)
+- `EndPadding` - Seconds after (default: 30, max: 10800)
+
+**Example Request**:
+```bash
+curl -X POST "https://api.hdhomerun.com/api/recording_rules" \
+  -d "DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb" \
+  -d "Cmd=add" \
+  -d "SeriesID=C18361200EN88S3" \
+  -d "DateTimeOnly=1744567200" \
+  -d "ChannelOnly=2.1"
+```
+
+**JavaScript Example**:
+```javascript
+async function createOneTimeRecording(deviceAuth, seriesId, dateTime, channel) {
+  const params = new URLSearchParams({
+    DeviceAuth: deviceAuth,
+    Cmd: 'add',
+    SeriesID: seriesId,
+    DateTimeOnly: dateTime.toString(),
+    ChannelOnly: channel
+  });
+
+  const response = await axios.post(
+    'https://api.hdhomerun.com/api/recording_rules',
+    params
+  );
+
+  return response.data;
+}
+
+// Usage - schedule recording for specific date/time
+const airDateTime = Math.floor(new Date('2025-04-15T18:00:00Z').getTime() / 1000);
+await createOneTimeRecording('3KFU8ZYZnKADs5SHUXWWuqLb', 'C18361200EN88S3', airDateTime, '2.1');
+```
+
+**Important Notes**:
+- One-time recordings auto-expire after the scheduled time passes
+- Both `DateTimeOnly` and `ChannelOnly` are mandatory for one-time recordings
+- Multiple one-time rules can exist for the same series
+- One-time recordings always have highest priority
+
+#### Delete Recording Rule
+
+**Method**: POST
+**Endpoint**: `https://api.hdhomerun.com/api/recording_rules`
+
+**Parameters**:
+- `DeviceAuth` - Authentication token
+- `Cmd` - Must be "delete"
+- `RecordingRuleID` - ID of rule to delete
+
+**Example Request**:
+```bash
+curl -X POST "https://api.hdhomerun.com/api/recording_rules" \
+  -d "DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb" \
+  -d "Cmd=delete" \
+  -d "RecordingRuleID=7897331"
+```
+
+**JavaScript Example**:
+```javascript
+async function deleteRecordingRule(deviceAuth, ruleId) {
+  const params = new URLSearchParams({
+    DeviceAuth: deviceAuth,
+    Cmd: 'delete',
+    RecordingRuleID: ruleId
+  });
+
+  const response = await axios.post(
+    'https://api.hdhomerun.com/api/recording_rules',
+    params
+  );
+
+  return response.data;
+}
+
+// Usage
+await deleteRecordingRule('3KFU8ZYZnKADs5SHUXWWuqLb', '7897331');
+```
+
+#### Change Recording Rule Priority
+
+**Method**: POST
+**Endpoint**: `https://api.hdhomerun.com/api/recording_rules`
+
+**Parameters**:
+- `DeviceAuth` - Authentication token
+- `Cmd` - Must be "change"
+- `RecordingRuleID` - ID of rule to modify
+- `AfterRecordingRuleID` - Position reference ("0" for highest priority, or ID of rule to place after)
+
+**Example Request**:
+```bash
+# Move rule to highest priority
+curl -X POST "https://api.hdhomerun.com/api/recording_rules" \
+  -d "DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb" \
+  -d "Cmd=change" \
+  -d "RecordingRuleID=7897331" \
+  -d "AfterRecordingRuleID=0"
+
+# Move rule after another rule
+curl -X POST "https://api.hdhomerun.com/api/recording_rules" \
+  -d "DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb" \
+  -d "Cmd=change" \
+  -d "RecordingRuleID=7897331" \
+  -d "AfterRecordingRuleID=7939758"
+```
+
+**Important Notes**:
+- Priority only applies to series/movie rules
+- DateTimeOnly-ChannelOnly rules (one-time recordings) always have highest priority
+- When tuner conflicts occur, higher priority rules take precedence
+
+#### Local Device Synchronization
+
+After modifying recording rules via the cloud API, the local device must be notified to recalculate its recording schedule.
+
+**Endpoint**: `POST http://{device_ip}/recording_events.post?sync`
+**Method**: POST
+**Body**: Empty (Content-Length: 0)
+
+This endpoint triggers the device to:
+1. Fetch updated recording rules from the cloud API
+2. Recalculate the recording schedule
+3. Update upcoming recordings list
+
+**Example Request**:
+```bash
+curl -X POST "http://192.168.1.100/recording_events.post?sync"
+```
+
+**JavaScript Example**:
+```javascript
+async function syncRecordingRules(deviceIp) {
+  try {
+    const response = await axios.post(
+      `http://${deviceIp}/recording_events.post?sync`,
+      null,
+      { timeout: 5000 }
+    );
+    return { success: true, status: response.status };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Complete workflow: Add rule + sync device
+async function addRecordingAndSync(deviceAuth, deviceIp, seriesId, options) {
+  // 1. Add recording rule via cloud API
+  await createSeriesRecording(deviceAuth, seriesId, options);
+
+  // 2. Notify local device to sync
+  await syncRecordingRules(deviceIp);
+
+  console.log('Recording scheduled and device synced');
+}
+```
+
+**Response**:
+- Success: `200 OK` with empty body
+- The endpoint returns immediately; sync happens in background
+
+**Important Notes**:
+- This endpoint was discovered via network packet capture (tcpdump/Wireshark)
+- The request body must be empty
+- Multiple devices can be notified if recordings are stored on multiple HDHomeRun DVRs
+- The sync is asynchronous; the device processes the update in the background
+
+#### Recording Rule Fields Reference
+
+| Field | Type | Description |
+|-------|------|-------------|
+| RecordingRuleID | string | Unique identifier for the rule (read-only, assigned by server) |
+| SeriesID | string | Series/program identifier from guide data |
+| Title | string | Program title (read-only, populated by server) |
+| Synopsis | string | Program description (read-only, populated by server) |
+| ImageURL | string | Program artwork URL (read-only, populated by server) |
+| ChannelOnly | string | Restrict to specific channels (pipe-separated: "2.1\|4.1\|702") |
+| TeamOnly | string | Filter by team names for sports (pipe-separated) |
+| RecentOnly | bool | Only record new episodes (0 or 1) |
+| AfterOriginalAirdateOnly | int64 | Unix timestamp - only episodes with original airdate >= this value |
+| DateTimeOnly | int64 | Unix timestamp for one-time recording (requires ChannelOnly) |
+| Priority | int | Rule priority for conflict resolution (1 = highest) |
+| StartPadding | uint | Seconds to start early (default: 30, max: 3600) |
+| EndPadding | uint | Seconds to continue after end (default: 30, max: 10800) |
+
+#### Rule Behavior Notes
+
+**Series vs One-Time Rules**:
+- **Series rules**: Persist indefinitely, only one per series
+- **One-time rules**: Auto-expire after scheduled time, multiple allowed per series
+
+**Modifying Existing Rules**:
+- Sending "add" command with same SeriesID updates the existing rule
+- All parameters are replaced (not merged); include all desired settings
+
+**Channel Filtering**:
+- `ChannelOnly` accepts multiple channels: "2.1|4.1|702"
+- Empty/omitted = record from any channel
+- Required for one-time recordings (single channel only)
+
+**Recent Episodes Only**:
+- `RecentOnly=1` restricts to episodes marked as "FirstAiring"
+- Prevents recording of reruns
+- Combine with `AfterOriginalAirdateOnly` for precise control
+
+**AfterOriginalAirdateOnly**:
+- Unix timestamp threshold
+- Records first-airings and episodes with original airdate >= threshold
+- Useful for "catch up from Season X" scenarios
+
+**Padding**:
+- Default: 30 seconds before/after
+- Useful for handling broadcast timing inconsistencies
+- Max values: StartPadding (3600s/1hr), EndPadding (10800s/3hr)
+
+#### Common Recording Scenarios
+
+**Record entire series, new episodes only**:
+```javascript
+{
+  SeriesID: 'C18361200EN88S3',
+  RecentOnly: 1
+}
+```
+
+**Record series on specific channel**:
+```javascript
+{
+  SeriesID: 'C18361200EN88S3',
+  ChannelOnly: '2.1',
+  RecentOnly: 1
+}
+```
+
+**Record with custom padding**:
+```javascript
+{
+  SeriesID: 'C18361200EN88S3',
+  StartPadding: 120,  // 2 minutes early
+  EndPadding: 300     // 5 minutes late
+}
+```
+
+**Record specific airing only**:
+```javascript
+{
+  SeriesID: 'C18361200EN88S3',
+  DateTimeOnly: 1744567200,
+  ChannelOnly: '2.1'
+}
+```
+
+**Record from multiple channels**:
+```javascript
+{
+  SeriesID: 'C18361200EN88S3',
+  ChannelOnly: '2.1|4.1|702',
+  RecentOnly: 1
+}
+```
+
+#### Discovery Method
+
+The recording rules API documentation was compiled through:
+1. Network packet capture analysis (tcpdump/tshark) of HDHomeRun mobile app
+2. Official SiliconDust documentation: https://github.com/Silicondust/documentation/wiki
+3. Reverse engineering of the cloud API endpoints
+
+The `/recording_events.post?sync` endpoint was discovered by capturing POST requests with empty bodies in the network traffic.
+
+## Program Guide API
+
+HDHomeRun provides electronic program guide (EPG) data through cloud-based APIs. The guide data spans 14 days (2 weeks forward and 2 weeks back) and requires an active HDHomeRun DVR subscription.
+
+### Overview
+
+**Guide Data Provider**: HDHomeRun sources EPG data from Gracenote (Nielsen), which provides:
+- Program titles, descriptions, and synopses
+- Episode numbers and titles
+- Original air dates
+- Series artwork and channel logos
+- Category/genre filters
+
+**Subscription Requirement**: Guide data access requires a paid HDHomeRun DVR subscription due to licensing costs.
+
+**Authentication**: All guide API requests require a `DeviceAuth` token obtained from the device's `/discover.json` endpoint.
+
+**Important**: DeviceAuth tokens expire every 8-16 hours and must be refreshed regularly for automated applications.
+
+### Two API Options
+
+HDHomeRun provides two different guide API endpoints for different use cases:
+
+1. **JSON Guide API** - For real-time lookups and selective data retrieval
+2. **XMLTV Guide API** - For bulk download and caching (third-party DVR software)
+
+### JSON Guide API
+
+The JSON API is ideal for applications that need to look up current and upcoming programs on demand.
+
+#### Endpoint
+
+**Method**: GET
+**URL**: `https://api.hdhomerun.com/api/guide`
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| DeviceAuth | string | Yes | Authentication token from device |
+| Start | int64 | No | Unix timestamp (default: current time) |
+| Duration | uint | No | Hours of guide data (default: 4, max: 24) |
+| Channel | string | No | Specific channel number, or omit for all channels |
+
+#### Example Request
+
+```bash
+# Get 4 hours of guide data for all channels starting now
+curl "https://api.hdhomerun.com/api/guide?DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb&Duration=4"
+
+# Get 8 hours starting at specific time
+curl "https://api.hdhomerun.com/api/guide?DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb&Start=1744567200&Duration=8"
+
+# Get guide data for specific channel
+curl "https://api.hdhomerun.com/api/guide?DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb&Channel=2.1&Duration=12"
+```
+
+#### Response Format
+
+```json
+[
+  {
+    "GuideNumber": "2.1",
+    "GuideName": "WGBHDT",
+    "Affiliate": "PBS",
+    "ImageURL": "https://img.hdhomerun.com/channels/US28055.png",
+    "Guide": [
+      {
+        "StartTime": 1764950400,
+        "EndTime": 1764952200,
+        "Title": "Nova",
+        "EpisodeNumber": "S48E15",
+        "EpisodeTitle": "Dinosaur Apocalypse",
+        "Synopsis": "Scientists uncover new clues about the catastrophic asteroid impact that wiped out the dinosaurs 66 million years ago.",
+        "OriginalAirdate": 1633478400,
+        "SeriesID": "C184159ENJENN",
+        "ImageURL": "https://img.hdhomerun.com/titles/C184159ENJENN.jpg",
+        "Filter": [
+          "Science"
+        ]
+      }
+    ]
+  }
+]
+```
+
+#### Response Fields
+
+**Channel Level**:
+- `GuideNumber` - User-facing channel number (e.g., "2.1")
+- `GuideName` - Channel call letters
+- `Affiliate` - Network affiliation (PBS, CBS, NBC, etc.)
+- `ImageURL` - Channel logo/branding image
+- `Guide` - Array of programs for this channel
+
+**Program Level**:
+- `StartTime` - Unix timestamp when program starts
+- `EndTime` - Unix timestamp when program ends
+- `Title` - Program title
+- `EpisodeNumber` - Season/episode identifier (e.g., "S48E15")
+- `EpisodeTitle` - Episode name (optional)
+- `Synopsis` - Program description
+- `OriginalAirdate` - Unix timestamp of first broadcast
+- `SeriesID` - Unique series identifier (critical for recording rules)
+- `ImageURL` - Series artwork
+- `Filter` - Array of category tags (Kids, Sports, News, etc.)
+
+**Key Field: SeriesID**
+
+The `SeriesID` field is the critical link between guide data and recording functionality:
+- Uniquely identifies each series/show
+- Used as primary parameter in recording rules API
+- Consistent across all airings and channels
+- Format: Alphanumeric string (e.g., "C184159ENJENN")
+
+#### JavaScript Example
+
+```javascript
+const axios = require('axios');
+
+async function getGuideData(deviceAuth, options = {}) {
+  const params = new URLSearchParams({
+    DeviceAuth: deviceAuth,
+    ...options
+  });
+
+  const response = await axios.get(
+    `https://api.hdhomerun.com/api/guide?${params}`
+  );
+
+  return response.data;
+}
+
+// Get current guide data
+const guide = await getGuideData('3KFU8ZYZnKADs5SHUXWWuqLb', {
+  Duration: 4
+});
+
+// Find programs on specific channel
+const channel = guide.find(ch => ch.GuideNumber === '2.1');
+console.log(`${channel.Guide.length} programs on ${channel.GuideName}`);
+
+// Extract SeriesID for recording
+const program = channel.Guide[0];
+console.log(`To record "${program.Title}", use SeriesID: ${program.SeriesID}`);
+```
+
+### XMLTV Guide API
+
+The XMLTV API provides complete 14-day guide data in standard XMLTV format, designed for third-party DVR applications (Plex, Jellyfin, Emby, etc.).
+
+#### Endpoint
+
+**Method**: GET
+**URL**: `https://api.hdhomerun.com/api/xmltv`
+
+#### Parameters
+
+**Option 1: Device Authentication (Recommended)**
+- `DeviceAuth` - Concatenated DeviceAuth strings from all HDHomeRun tuners
+
+**Option 2: Email + Device IDs**
+- `Email` - Account email address
+- `DeviceIDs` - Comma-separated device identifiers
+
+#### Critical Requirements
+
+1. **Gzip Compression Required**: HTTP client must send `Accept-Encoding: gzip` header
+2. **Refresh Schedule**: Use randomized intervals between 20-28 hours (not fixed daily schedules)
+3. **No Bulk Downloads**: Don't repeatedly download full guide data unnecessarily
+
+#### Example Requests
+
+```bash
+# Using curl with compression (recommended)
+curl --compressed "https://api.hdhomerun.com/api/xmltv?DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb" > guide.xml
+
+# Explicit gzip header
+curl -H "Accept-Encoding: gzip" "https://api.hdhomerun.com/api/xmltv?DeviceAuth=3KFU8ZYZnKADs5SHUXWWuqLb" > guide.xml.gz
+
+# Using email + device IDs
+curl --compressed "https://api.hdhomerun.com/api/xmltv?Email=user@example.com&DeviceIDs=10AA5474,10BB6585" > guide.xml
+```
+
+#### Response Format
+
+Returns standard XMLTV-formatted XML data:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<tv source-info-url="https://www.hdhomerun.com/" source-info-name="HDHomeRun">
+  <channel id="US28055.hdhomerun.com">
+    <display-name>WGBHDT</display-name>
+    <display-name>2.1 WGBHDT</display-name>
+    <display-name>2.1</display-name>
+    <display-name>PBS</display-name>
+    <lcn>2.1</lcn>
+    <icon src="https://img.hdhomerun.com/channels/US28055.png" width="360" height="270"/>
+  </channel>
+
+  <programme start="20251205093000 +0000" stop="20251205100000 +0000" channel="US28055.hdhomerun.com">
+    <title lang="en">Nova</title>
+    <sub-title lang="en">Dinosaur Apocalypse</sub-title>
+    <desc lang="en">Scientists uncover new clues about the catastrophic asteroid impact that wiped out the dinosaurs 66 million years ago.</desc>
+    <date>20211005</date>
+    <episode-num system="onscreen">S48E15</episode-num>
+    <icon src="https://img.hdhomerun.com/titles/C184159ENJENN.jpg"/>
+  </programme>
+</tv>
+```
+
+#### JavaScript Example
+
+```javascript
+const axios = require('axios');
+const fs = require('fs');
+
+async function downloadXMLTVGuide(deviceAuth, outputFile) {
+  const response = await axios.get(
+    `https://api.hdhomerun.com/api/xmltv?DeviceAuth=${deviceAuth}`,
+    {
+      headers: {
+        'Accept-Encoding': 'gzip, deflate'
+      },
+      decompress: true
+    }
+  );
+
+  fs.writeFileSync(outputFile, response.data);
+  console.log(`Guide data saved to ${outputFile}`);
+}
+
+// Download and save guide
+await downloadXMLTVGuide('3KFU8ZYZnKADs5SHUXWWuqLb', 'guide.xml');
+```
+
+### Authentication & Token Management
+
+#### Obtaining DeviceAuth
+
+The DeviceAuth token is retrieved from any HDHomeRun device on your network:
+
+```bash
+# Get device auth from local device
+curl -s http://192.168.1.100/discover.json | jq -r '.DeviceAuth'
+```
+
+**Response**:
+```json
+{
+  "DeviceAuth": "3KFU8ZYZnKADs5SHUXWWuqLb",
+  ...
+}
+```
+
+#### Token Expiration
+
+**Critical**: DeviceAuth tokens expire every 8-16 hours. Applications must:
+1. Fetch fresh token from device before each API call
+2. Handle 401/403 errors by refreshing token
+3. Cache tokens for short periods only (< 4 hours recommended)
+
+#### Multiple Devices
+
+For households with multiple HDHomeRun units, concatenate all DeviceAuth strings:
+
+```javascript
+async function getCombinedDeviceAuth(deviceIps) {
+  const authTokens = [];
+
+  for (const ip of deviceIps) {
+    const response = await axios.get(`http://${ip}/discover.json`);
+    authTokens.push(response.data.DeviceAuth);
+  }
+
+  return authTokens.join('');
+}
+
+// Usage
+const auth = await getCombinedDeviceAuth(['192.168.1.100', '192.168.1.101']);
+```
+
+### Guide Data Workflow
+
+Here's how guide data integrates with recording functionality:
+
+```
+1. User browses TV guide
+   └─> App calls JSON Guide API for current/upcoming programs
+   └─> Displays channel lineup with program details
+
+2. User finds interesting program
+   └─> App extracts SeriesID from guide data
+   └─> Shows "Record Series" button
+
+3. User schedules recording
+   └─> App calls Recording Rules API with SeriesID
+   └─> Cloud API creates recording rule
+
+4. Device fetches updated rules
+   └─> Matches SeriesID in guide to scheduled recordings
+   └─> Records matching programs automatically
+```
+
+**Example Complete Workflow**:
+
+```javascript
+// 1. Get current guide data
+const guide = await getGuideData(deviceAuth, { Duration: 8 });
+
+// 2. User selects a program
+const channel = guide.find(ch => ch.GuideNumber === '2.1');
+const program = channel.Guide[0];
+
+console.log(`User wants to record: ${program.Title}`);
+console.log(`SeriesID: ${program.SeriesID}`);
+
+// 3. Create recording rule using SeriesID from guide
+const params = new URLSearchParams({
+  DeviceAuth: deviceAuth,
+  Cmd: 'add',
+  SeriesID: program.SeriesID,  // <-- Critical link
+  RecentOnly: 1,
+  ChannelOnly: channel.GuideNumber
+});
+
+await axios.post('https://api.hdhomerun.com/api/recording_rules', params);
+
+// 4. Sync local device
+await axios.post(`http://192.168.1.100/recording_events.post?sync`, null);
+
+console.log(`Recording scheduled for "${program.Title}" on ${channel.GuideName}`);
+```
+
+### Best Practices
+
+#### For JSON Guide API
+
+1. **Request only what you need**: Use `Duration` parameter to limit data
+2. **Filter by channel**: Use `Channel` parameter for single-channel lookups
+3. **Cache strategically**: Guide data for near-future doesn't change frequently
+4. **Respect rate limits**: Don't poll excessively (every 5-15 minutes is reasonable)
+
+#### For XMLTV Guide API
+
+1. **Use random intervals**: Refresh between 20-28 hours, not fixed schedules
+2. **Enable compression**: Always use gzip to reduce bandwidth
+3. **Store locally**: Cache the full guide file, don't re-download for every query
+4. **Stagger updates**: If managing multiple systems, randomize update times
+
+#### Token Management
+
+1. **Refresh before expiration**: Don't wait for 401 errors
+2. **Implement retry logic**: Auto-refresh token on auth failures
+3. **Log token age**: Track when token was last fetched
+
+#### Example Caching Strategy
+
+```javascript
+class GuideCache {
+  constructor(deviceAuth) {
+    this.deviceAuth = deviceAuth;
+    this.cache = null;
+    this.cacheTime = null;
+    this.cacheDuration = 15 * 60 * 1000; // 15 minutes
+  }
+
+  async getGuide(options = {}) {
+    const now = Date.now();
+
+    // Return cached data if fresh
+    if (this.cache && (now - this.cacheTime) < this.cacheDuration) {
+      return this.cache;
+    }
+
+    // Fetch fresh data
+    this.cache = await getGuideData(this.deviceAuth, options);
+    this.cacheTime = now;
+
+    return this.cache;
+  }
+}
+
+// Usage
+const guideCache = new GuideCache(deviceAuth);
+const guide = await guideCache.getGuide({ Duration: 4 });
+```
+
+### Common Use Cases
+
+#### Find What's On Now
+
+```javascript
+async function getCurrentPrograms(deviceAuth) {
+  const now = Math.floor(Date.now() / 1000);
+  const guide = await getGuideData(deviceAuth, { Duration: 1 });
+
+  return guide.map(channel => {
+    const current = channel.Guide.find(
+      prog => prog.StartTime <= now && prog.EndTime > now
+    );
+
+    return {
+      channel: channel.GuideNumber,
+      name: channel.GuideName,
+      program: current?.Title || 'No data',
+      episode: current?.EpisodeTitle
+    };
+  });
+}
+```
+
+#### Search for Series
+
+```javascript
+async function searchGuide(deviceAuth, searchTerm) {
+  const guide = await getGuideData(deviceAuth, { Duration: 24 });
+  const results = [];
+
+  for (const channel of guide) {
+    for (const program of channel.Guide) {
+      if (program.Title.toLowerCase().includes(searchTerm.toLowerCase())) {
+        results.push({
+          title: program.Title,
+          channel: channel.GuideNumber,
+          startTime: new Date(program.StartTime * 1000),
+          seriesId: program.SeriesID
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+// Find all airings of "Nova"
+const results = await searchGuide(deviceAuth, 'nova');
+```
+
+#### Get Program by Time Slot
+
+```javascript
+async function getProgramAt(deviceAuth, channel, timestamp) {
+  const guide = await getGuideData(deviceAuth, {
+    Start: timestamp - 3600, // Start 1 hour before
+    Duration: 2,
+    Channel: channel
+  });
+
+  const channelData = guide[0];
+  const program = channelData.Guide.find(
+    prog => prog.StartTime <= timestamp && prog.EndTime > timestamp
+  );
+
+  return program;
+}
+
+// What's on channel 2.1 at 8 PM tonight?
+const program = await getProgramAt(
+  deviceAuth,
+  '2.1',
+  Math.floor(new Date('2025-12-05T20:00:00').getTime() / 1000)
+);
+```
+
+### Error Handling
+
+#### Common Errors
+
+**401 Unauthorized / 403 Forbidden**:
+- DeviceAuth token expired
+- Solution: Fetch fresh token from device
+
+**404 Not Found**:
+- Invalid endpoint or parameters
+- Solution: Verify API URL and parameter names
+
+**No guide data / Empty response**:
+- No active DVR subscription
+- Device not properly registered
+- Solution: Verify subscription status at my.hdhomerun.com
+
+#### Example Error Handling
+
+```javascript
+async function getGuideWithRetry(deviceIp, options = {}) {
+  try {
+    // Get fresh device auth
+    const discover = await axios.get(`http://${deviceIp}/discover.json`);
+    const deviceAuth = discover.data.DeviceAuth;
+
+    // Fetch guide data
+    const guide = await getGuideData(deviceAuth, options);
+    return { success: true, data: guide };
+
+  } catch (error) {
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      return { success: false, error: 'Authentication failed - token expired' };
+    }
+
+    return { success: false, error: error.message };
+  }
+}
+```
+
+### Discovery Method
+
+The guide API documentation was compiled from:
+1. Official SiliconDust documentation: https://github.com/Silicondust/documentation/wiki
+2. Testing against live HDHomeRun devices
+3. Community forum discussions and third-party integration examples
 
 ## Updating DVR Content
 
@@ -469,6 +1377,8 @@ Resume times may use special values:
 
 ### Official Documentation
 - [HDHomeRun Discovery API](http://info.hdhomerun.com/info/discovery_api)
+- [HDHomeRun DVR API](http://info.hdhomerun.com/info/dvr_api)
+- [SiliconDust Documentation Wiki](https://github.com/Silicondust/documentation/wiki) - Recording rules, guide API, and DVR operations
 - [HDHomeRun Development Guide](https://www.silicondust.com/hdhomerun/hdhomerun_development.pdf)
 - [HDHomeRun Discover API PDF](https://www.silicondust.com/hdhomerun/hdhomerun_discover_api.pdf)
 

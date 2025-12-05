@@ -13,7 +13,7 @@ class HDHomeRunDatabase {
     await db.open(this.dbPath);
     this.isOpen = true;
 
-    // Check if tables exist, if not create them
+    // Check if core tables exist, if not create them
     const tables = await db.run(`
       SELECT name FROM sqlite_master
       WHERE type='table' AND name IN ('devices', 'series', 'episodes')
@@ -25,6 +25,17 @@ class HDHomeRunDatabase {
     } else {
       // Ensure triggers exist (for databases created before triggers were added)
       await this.ensureTriggersExist();
+    }
+
+    // Check if guide tables exist, if not create them (auto-migration)
+    const guideTables = await db.run(`
+      SELECT name FROM sqlite_master
+      WHERE type='table' AND name IN ('guide_channels', 'guide_programs', 'recording_rules')
+    `);
+
+    if (!guideTables || guideTables.length < 3) {
+      console.log('Guide tables not found, creating guide schema...');
+      await this.createGuideSchema();
     }
 
     return db;
@@ -904,6 +915,53 @@ class HDHomeRunDatabase {
     await db.run(`DELETE FROM episodes WHERE id = ?`, [episodeId]);
     console.log(`Episode ${episodeId} deleted from database`);
     return true;
+  }
+
+  async createGuideSchema() {
+    // Create guide and recording rules tables using native SQLite exec
+    const schemaPath = path.join(__dirname, '..', 'schema.sql');
+    const fullSchema = fs.readFileSync(schemaPath, 'utf-8');
+
+    // Extract the guide schema section
+    const guideSchemaMatch = fullSchema.match(
+      /-- Program Guide and Recording Rules Tables[\s\S]*$/
+    );
+
+    if (!guideSchemaMatch) {
+      throw new Error('Could not find guide schema in schema.sql');
+    }
+
+    const guideSchema = guideSchemaMatch[0];
+
+    // Use sqlite3 directly for batch execution (handles statement ordering)
+    const sqlite3 = require('sqlite3').verbose();
+    const dbPath = this.dbPath;
+
+    return new Promise((resolve, reject) => {
+      const sqliteDb = new sqlite3.Database(dbPath, (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        sqliteDb.exec(guideSchema, (err) => {
+          sqliteDb.close();
+
+          if (err) {
+            // Ignore "table already exists" errors
+            if (err.message.includes('already exists')) {
+              console.log('Guide schema already exists (some tables present)');
+              resolve();
+            } else {
+              reject(err);
+            }
+          } else {
+            console.log('Guide schema created successfully');
+            resolve();
+          }
+        });
+      });
+    });
   }
 
   async close() {

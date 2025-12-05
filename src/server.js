@@ -8,6 +8,8 @@ const HDHomeRunDiscovery = require('./discovery');
 const HDHomeRunDVR = require('./dvr');
 const HDHomeRunDatabase = require('./database');
 const HLSStreamManager = require('./hls-stream');
+const GuideManager = require('./guide');
+const RecordingRulesManager = require('./recording-rules');
 
 class HDHomeRunServer {
   constructor(options = {}) {
@@ -549,6 +551,255 @@ class HDHomeRunServer {
       }
     });
 
+    // Program Guide endpoints
+
+    // Get program guide (cached, auto-refreshes if stale)
+    this.app.get('/api/guide', async (req, res) => {
+      try {
+        const { forceRefresh = false } = req.query;
+
+        const guide = await GuideManager.getGuide({
+          forceRefresh: forceRefresh === 'true'
+        });
+
+        res.json({
+          guide,
+          channels: guide.length,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        this.log(`Error getting guide: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to retrieve program guide',
+          details: error.message
+        });
+      }
+    });
+
+    // Search program guide
+    this.app.get('/api/guide/search', async (req, res) => {
+      try {
+        const { q, query, channel, limit = 50 } = req.query;
+        const searchQuery = q || query;
+
+        if (!searchQuery) {
+          return res.status(400).json({
+            error: 'Missing search query',
+            message: 'Provide search query using ?q= or ?query= parameter'
+          });
+        }
+
+        const results = await GuideManager.searchGuide(searchQuery, {
+          channel,
+          limit: parseInt(limit)
+        });
+
+        res.json({
+          results,
+          count: results.length,
+          query: searchQuery,
+          filters: { channel, limit }
+        });
+      } catch (error) {
+        this.log(`Error searching guide: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to search program guide',
+          details: error.message
+        });
+      }
+    });
+
+    // Get what's on now
+    this.app.get('/api/guide/now', async (req, res) => {
+      try {
+        const currentPrograms = await GuideManager.getCurrentPrograms();
+
+        res.json({
+          programs: currentPrograms,
+          count: currentPrograms.length,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        this.log(`Error getting current programs: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to get current programs',
+          details: error.message
+        });
+      }
+    });
+
+    // Recording Rules endpoints
+
+    // List all recording rules
+    this.app.get('/api/recording-rules', async (req, res) => {
+      try {
+        const rules = await RecordingRulesManager.listRules();
+
+        res.json({
+          rules,
+          count: rules.length,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        this.log(`Error listing recording rules: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to retrieve recording rules',
+          details: error.message
+        });
+      }
+    });
+
+    // Create or update recording rule
+    this.app.post('/api/recording-rules', async (req, res) => {
+      try {
+        const {
+          SeriesID,
+          ChannelOnly,
+          TeamOnly,
+          RecentOnly,
+          AfterOriginalAirdateOnly,
+          DateTimeOnly,
+          StartPadding,
+          EndPadding
+        } = req.body;
+
+        // Validate required fields
+        if (!SeriesID) {
+          return res.status(400).json({
+            error: 'Missing required field',
+            message: 'SeriesID is required'
+          });
+        }
+
+        // Build params object
+        const params = { SeriesID };
+        if (ChannelOnly) params.ChannelOnly = ChannelOnly;
+        if (TeamOnly) params.TeamOnly = TeamOnly;
+        if (RecentOnly !== undefined) params.RecentOnly = RecentOnly ? 1 : 0;
+        if (AfterOriginalAirdateOnly) params.AfterOriginalAirdateOnly = AfterOriginalAirdateOnly;
+        if (DateTimeOnly) params.DateTimeOnly = DateTimeOnly;
+        if (StartPadding) params.StartPadding = StartPadding;
+        if (EndPadding) params.EndPadding = EndPadding;
+
+        this.log(`Creating recording rule for SeriesID: ${SeriesID}`);
+
+        const result = await RecordingRulesManager.createRule(params);
+
+        res.json({
+          success: true,
+          message: 'Recording rule created',
+          params,
+          result
+        });
+      } catch (error) {
+        this.log(`Error creating recording rule: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to create recording rule',
+          details: error.message
+        });
+      }
+    });
+
+    // Delete recording rule
+    this.app.delete('/api/recording-rules/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        this.log(`Deleting recording rule: ${id}`);
+
+        const result = await RecordingRulesManager.deleteRule(id);
+
+        res.json({
+          success: true,
+          message: 'Recording rule deleted',
+          recordingRuleId: id,
+          result
+        });
+      } catch (error) {
+        this.log(`Error deleting recording rule: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to delete recording rule',
+          details: error.message
+        });
+      }
+    });
+
+    // Change recording rule priority
+    this.app.put('/api/recording-rules/:id/priority', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { afterRecordingRuleId } = req.body;
+
+        if (afterRecordingRuleId === undefined) {
+          return res.status(400).json({
+            error: 'Missing required field',
+            message: 'afterRecordingRuleId is required (use "0" for highest priority)'
+          });
+        }
+
+        this.log(`Changing priority for recording rule ${id} to after ${afterRecordingRuleId}`);
+
+        const result = await RecordingRulesManager.changePriority(id, afterRecordingRuleId);
+
+        res.json({
+          success: true,
+          message: 'Recording rule priority updated',
+          recordingRuleId: id,
+          afterRecordingRuleId,
+          result
+        });
+      } catch (error) {
+        this.log(`Error changing recording rule priority: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to change recording rule priority',
+          details: error.message
+        });
+      }
+    });
+
+    // Get recording rule by ID
+    this.app.get('/api/recording-rules/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const rule = await RecordingRulesManager.getRuleById(id);
+
+        if (!rule) {
+          return res.status(404).json({ error: 'Recording rule not found' });
+        }
+
+        res.json({ rule });
+      } catch (error) {
+        this.log(`Error getting recording rule: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to retrieve recording rule',
+          details: error.message
+        });
+      }
+    });
+
+    // Check if series has recording rule
+    this.app.get('/api/series/:seriesId/recording-rule', async (req, res) => {
+      try {
+        const { seriesId } = req.params;
+
+        const hasRule = await RecordingRulesManager.hasRecordingRule(seriesId);
+        const rules = await RecordingRulesManager.getRulesBySeriesId(seriesId);
+
+        res.json({
+          seriesId,
+          hasRecordingRule: hasRule,
+          rules
+        });
+      } catch (error) {
+        this.log(`Error checking recording rule: ${error.message}`);
+        res.status(500).json({
+          error: 'Failed to check recording rule',
+          details: error.message
+        });
+      }
+    });
+
     // HLS Streaming endpoints
 
     // Get HLS playlist for an episode
@@ -691,7 +942,17 @@ class HDHomeRunServer {
           'GET /api/episodes/recent',
           'GET /api/episodes/:id',
           'PUT /api/episodes/:id/progress',
+          'DELETE /api/episodes/:id',
           'POST /api/discover',
+          'GET /api/guide',
+          'GET /api/guide/search',
+          'GET /api/guide/now',
+          'GET /api/recording-rules',
+          'POST /api/recording-rules',
+          'GET /api/recording-rules/:id',
+          'DELETE /api/recording-rules/:id',
+          'PUT /api/recording-rules/:id/priority',
+          'GET /api/series/:seriesId/recording-rule',
           'GET /api/stream/:episodeId/playlist.m3u8',
           'GET /api/stream/:episodeId/:filename',
           'GET /api/stream/:episodeId/status'
@@ -866,7 +1127,14 @@ class HDHomeRunServer {
         this.log('  GET /api/episodes/recent - Recent episodes');
         this.log('  GET /api/episodes/:id - Get specific episode');
         this.log('  PUT /api/episodes/:id/progress - Update watch progress');
+        this.log('  DELETE /api/episodes/:id - Delete episode');
         this.log('  POST /api/discover - Manual discovery trigger');
+        this.log('  GET /api/guide - Program guide (24hr, cached)');
+        this.log('  GET /api/guide/search - Search programs');
+        this.log('  GET /api/guide/now - What\'s on now');
+        this.log('  GET /api/recording-rules - List recording rules');
+        this.log('  POST /api/recording-rules - Create recording rule');
+        this.log('  DELETE /api/recording-rules/:id - Delete recording rule');
         this.log('  GET /api/stream/:episodeId/playlist.m3u8 - HLS stream');
         this.log('  GET /api/stream/:episodeId/status - Transcode status');
       });

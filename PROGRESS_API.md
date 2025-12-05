@@ -245,7 +245,7 @@ npm run dev
 Debug output will show:
 ```
 [DEBUG] Updated progress for episode 239: position=3600s, watched=0
-[DEBUG] Attempting to relay progress to HDHomeRun: http://10.30.2.237/recorded/cmd?id=...
+[DEBUG] Attempting to relay progress to HDHomeRun: http://192.168.1.100/recorded/cmd?id=...
 [DEBUG] HDHomeRun progress relay failed (expected): Request failed with status code 400
 ```
 

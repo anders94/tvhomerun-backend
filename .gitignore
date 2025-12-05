@@ -1,7 +1,10 @@
 .DS_Store
 *~
 .*~
-tvhdhomerun.db
+*.db
+*.db-journal
+*.pcap
+*capture*.txt
 node_modules/
 hls-cache/
 log/

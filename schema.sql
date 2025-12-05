@@ -248,5 +248,127 @@ END;
 -- SELECT * FROM episode_details ORDER BY episode_created DESC LIMIT 20;
 
 -- Get storage usage by series:
--- SELECT series_title, COUNT(*) as episodes, SUM(duration)/3600 as hours, device_name 
+-- SELECT series_title, COUNT(*) as episodes, SUM(duration)/3600 as hours, device_name
 -- FROM episode_details GROUP BY series_title ORDER BY hours DESC;
+
+-- ============================================================================
+-- Program Guide and Recording Rules Tables
+-- ============================================================================
+
+-- Channels table for caching guide channel information
+CREATE TABLE IF NOT EXISTS guide_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guide_number TEXT NOT NULL,              -- User-facing channel number (e.g., "2.1")
+    guide_name TEXT NOT NULL,                -- Channel call letters (e.g., "WGBHDT")
+    affiliate TEXT,                          -- Network affiliation (PBS, CBS, NBC, etc.)
+    image_url TEXT,                          -- Channel logo/branding image
+    channel_id TEXT,                         -- Internal channel ID (e.g., "US28055.hdhomerun.com")
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(guide_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_guide_channels_number ON guide_channels(guide_number);
+CREATE INDEX IF NOT EXISTS idx_guide_channels_name ON guide_channels(guide_name);
+CREATE INDEX IF NOT EXISTS idx_guide_channels_updated ON guide_channels(last_updated);
+
+-- Programs table for caching program guide data
+CREATE TABLE IF NOT EXISTS guide_programs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL,             -- Foreign key to guide_channels
+    series_id TEXT NOT NULL,                 -- Series identifier (critical for recording rules)
+    title TEXT NOT NULL,                     -- Program title
+    episode_number TEXT,                     -- Season/episode (e.g., "S48E15")
+    episode_title TEXT,                      -- Episode name
+    synopsis TEXT,                           -- Program description
+    start_time INTEGER NOT NULL,             -- Unix timestamp when program starts
+    end_time INTEGER NOT NULL,               -- Unix timestamp when program ends
+    duration INTEGER GENERATED ALWAYS AS (end_time - start_time) STORED,
+    original_airdate INTEGER,                -- Unix timestamp of first broadcast
+    image_url TEXT,                          -- Series artwork
+    filters TEXT,                            -- JSON array of category tags
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (channel_id) REFERENCES guide_channels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_guide_programs_channel ON guide_programs(channel_id);
+CREATE INDEX IF NOT EXISTS idx_guide_programs_series ON guide_programs(series_id);
+CREATE INDEX IF NOT EXISTS idx_guide_programs_time ON guide_programs(start_time, end_time);
+CREATE INDEX IF NOT EXISTS idx_guide_programs_title ON guide_programs(title);
+
+-- Recording Rules table for caching cloud recording rules
+CREATE TABLE IF NOT EXISTS recording_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recording_rule_id TEXT NOT NULL UNIQUE,  -- ID from cloud API
+    series_id TEXT NOT NULL,                 -- Series identifier
+    title TEXT,                              -- Program title (populated by cloud)
+    synopsis TEXT,                           -- Program description
+    image_url TEXT,                          -- Series artwork
+    channel_only TEXT,                       -- Pipe-separated channel numbers
+    team_only TEXT,                          -- Pipe-separated team names (sports)
+    recent_only BOOLEAN DEFAULT 0,           -- Only record new episodes
+    after_original_airdate_only INTEGER,     -- Unix timestamp threshold
+    date_time_only INTEGER,                  -- Unix timestamp for one-time recording
+    priority INTEGER,                        -- Rule priority (1 = highest)
+    start_padding INTEGER DEFAULT 30,        -- Seconds to start early
+    end_padding INTEGER DEFAULT 30,          -- Seconds to continue after end
+    last_synced DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_recording_rules_series ON recording_rules(series_id);
+CREATE INDEX IF NOT EXISTS idx_recording_rules_priority ON recording_rules(priority);
+CREATE INDEX IF NOT EXISTS idx_recording_rules_updated ON recording_rules(updated_at);
+
+-- View for current/upcoming programs (next 24 hours)
+CREATE VIEW IF NOT EXISTS current_guide AS
+SELECT
+    c.guide_number,
+    c.guide_name,
+    c.affiliate,
+    c.image_url as channel_image,
+    p.series_id,
+    p.title,
+    p.episode_number,
+    p.episode_title,
+    p.synopsis,
+    p.start_time,
+    p.end_time,
+    p.duration,
+    p.image_url as program_image,
+    p.filters,
+    CASE
+        WHEN p.start_time <= strftime('%s', 'now') AND p.end_time > strftime('%s', 'now') THEN 1
+        ELSE 0
+    END as is_current
+FROM guide_programs p
+JOIN guide_channels c ON p.channel_id = c.id
+WHERE p.start_time < strftime('%s', 'now', '+24 hours')
+ORDER BY c.guide_number, p.start_time;
+
+-- View for recording rules with series information
+CREATE VIEW IF NOT EXISTS recording_rules_detail AS
+SELECT
+    rr.recording_rule_id,
+    rr.series_id,
+    rr.title,
+    rr.synopsis,
+    rr.image_url,
+    rr.channel_only,
+    rr.team_only,
+    rr.recent_only,
+    rr.after_original_airdate_only,
+    rr.date_time_only,
+    rr.priority,
+    rr.start_padding,
+    rr.end_padding,
+    rr.last_synced,
+    COUNT(DISTINCT s.id) as local_episodes_count,
+    MAX(e.start_time) as last_recording_time
+FROM recording_rules rr
+LEFT JOIN series s ON s.series_id = rr.series_id
+LEFT JOIN episodes e ON e.series_id = s.id
+GROUP BY rr.recording_rule_id;
