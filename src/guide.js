@@ -22,7 +22,7 @@ class GuideManager {
    * Get device auth token from first available device
    */
   async getDeviceAuth() {
-    const devices = await db.all('SELECT device_auth FROM devices WHERE device_auth IS NOT NULL LIMIT 1');
+    const devices = await db.run('SELECT device_auth FROM devices WHERE device_auth IS NOT NULL LIMIT 1');
     if (!devices || devices.length === 0) {
       throw new Error('No devices found with authentication token');
     }
@@ -33,16 +33,16 @@ class GuideManager {
    * Check if cached guide data is fresh
    */
   async isGuideFresh() {
-    const result = await db.get(`
+    const results = await db.run(`
       SELECT MAX(last_updated) as last_update
       FROM guide_channels
     `);
 
-    if (!result || !result.last_update) {
+    if (!results || results.length === 0 || !results[0].last_update) {
       return false;
     }
 
-    const lastUpdate = new Date(result.last_update).getTime();
+    const lastUpdate = new Date(results[0].last_update).getTime();
     const now = Date.now();
     const age = now - lastUpdate;
 
@@ -100,8 +100,8 @@ class GuideManager {
     ]);
 
     // Get the channel ID
-    const result = await db.get('SELECT id FROM guide_channels WHERE guide_number = ?', [channel.GuideNumber]);
-    return result.id;
+    const results = await db.run('SELECT id FROM guide_channels WHERE guide_number = ?', [channel.GuideNumber]);
+    return results[0].id;
   }
 
   /**
@@ -179,7 +179,7 @@ class GuideManager {
     const now = Math.floor(Date.now() / 1000);
     const endWindow = now + (24 * 3600); // Next 24 hours
 
-    const programs = await db.all(`
+    const programs = await db.run(`
       SELECT
         c.guide_number,
         c.guide_name,
@@ -272,7 +272,7 @@ class GuideManager {
     sql += ' ORDER BY p.start_time LIMIT ?';
     params.push(limit);
 
-    return await db.all(sql, params);
+    return await db.run(sql, params);
   }
 
   /**
@@ -281,7 +281,7 @@ class GuideManager {
   async getCurrentPrograms() {
     const now = Math.floor(Date.now() / 1000);
 
-    return await db.all(`
+    return await db.run(`
       SELECT
         c.guide_number,
         c.guide_name,
@@ -304,7 +304,7 @@ class GuideManager {
    * Get program by SeriesID (useful for recording setup)
    */
   async getProgramBySeriesId(seriesId) {
-    return await db.get(`
+    const results = await db.run(`
       SELECT
         c.guide_number,
         c.guide_name,
@@ -319,6 +319,8 @@ class GuideManager {
       WHERE p.series_id = ?
       LIMIT 1
     `, [seriesId]);
+
+    return results && results.length > 0 ? results[0] : null;
   }
 }
 

@@ -21,7 +21,7 @@ class RecordingRulesManager {
    * Get device auth token from first available device
    */
   async getDeviceAuth() {
-    const devices = await db.all('SELECT device_auth FROM devices WHERE device_auth IS NOT NULL LIMIT 1');
+    const devices = await db.run('SELECT device_auth FROM devices WHERE device_auth IS NOT NULL LIMIT 1');
     if (!devices || devices.length === 0) {
       throw new Error('No devices found with authentication token');
     }
@@ -32,7 +32,7 @@ class RecordingRulesManager {
    * Get all devices for syncing
    */
   async getAllDevices() {
-    return await db.all('SELECT device_id, ip_address, base_url FROM devices WHERE ip_address IS NOT NULL');
+    return await db.run('SELECT device_id, ip_address, base_url FROM devices WHERE ip_address IS NOT NULL');
   }
 
   /**
@@ -233,17 +233,19 @@ class RecordingRulesManager {
    * Get recording rule from cache by ID
    */
   async getRuleById(recordingRuleId) {
-    return await db.get(`
+    const results = await db.run(`
       SELECT * FROM recording_rules_detail
       WHERE recording_rule_id = ?
     `, [recordingRuleId]);
+
+    return results && results.length > 0 ? results[0] : null;
   }
 
   /**
    * Get recording rules by SeriesID
    */
   async getRulesBySeriesId(seriesId) {
-    return await db.all(`
+    return await db.run(`
       SELECT * FROM recording_rules
       WHERE series_id = ?
       ORDER BY priority ASC
@@ -254,13 +256,13 @@ class RecordingRulesManager {
    * Check if a series has an active recording rule
    */
   async hasRecordingRule(seriesId) {
-    const result = await db.get(`
+    const results = await db.run(`
       SELECT COUNT(*) as count
       FROM recording_rules
       WHERE series_id = ?
     `, [seriesId]);
 
-    return result && result.count > 0;
+    return results && results.length > 0 && results[0].count > 0;
   }
 }
 

@@ -290,7 +290,8 @@ CREATE TABLE IF NOT EXISTS guide_programs (
     filters TEXT,                            -- JSON array of category tags
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (channel_id) REFERENCES guide_channels(id) ON DELETE CASCADE
+    FOREIGN KEY (channel_id) REFERENCES guide_channels(id) ON DELETE CASCADE,
+    UNIQUE(channel_id, series_id, start_time)
 );
 
 CREATE INDEX IF NOT EXISTS idx_guide_programs_channel ON guide_programs(channel_id);
