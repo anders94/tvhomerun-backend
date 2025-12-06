@@ -6,6 +6,8 @@ This is a backend server for TVHomeRun apps including [TVHomeRun tvOS](https://g
 
 - **Automatic Device Discovery**: Multi-method discovery using UDP broadcast, HTTP fallback, and network scanning
 - **DVR Content Management**: Access recorded shows, episodes, and metadata from HDHomeRun DVR devices
+- **Program Guide**: Browse EPG data with intelligent 15-minute caching, search programs, and see what's on now
+- **Recording Rules Management**: Create, delete, and prioritize series recordings via HDHomeRun cloud API
 - **REST API**: Clean JSON endpoints for integration with web apps, mobile apps, or home automation systems
 - **HLS Proxy**: Automatically creates HLS versions of episodes supporting native playback on Apple devices
 - **Playback Progress Sync**: Track and sync playback position between local database and HDHomeRun devices
@@ -372,6 +374,285 @@ Response:
 
 Note: Discovery runs in the background. Check `/api/info` for completion status.
 
+### Program Guide
+
+#### Get Program Guide
+```bash
+# Get next 24 hours of programming
+curl http://localhost:3000/api/guide
+
+# Force refresh from cloud API
+curl "http://localhost:3000/api/guide?forceRefresh=true"
+```
+
+Response:
+```json
+{
+  "guide": [
+    {
+      "GuideNumber": "2.1",
+      "GuideName": "WGBHDT",
+      "Affiliate": "PBS",
+      "ImageURL": "https://img.hdhomerun.com/channels/US28055.png",
+      "Guide": [
+        {
+          "SeriesID": "C185481ENLBRX",
+          "Title": "Nature",
+          "EpisodeNumber": "S42E12",
+          "EpisodeTitle": "Saving the Animals of Ukraine",
+          "Synopsis": "Documentary about rescuing animals during the war in Ukraine.",
+          "StartTime": 1764961200,
+          "EndTime": 1764966600,
+          "Duration": 5400,
+          "OriginalAirdate": 1715731200,
+          "ImageURL": "https://img.hdhomerun.com/titles/C185481ENLBRX.jpg",
+          "Filter": ["Documentary"]
+        }
+      ]
+    }
+  ],
+  "channels": 45,
+  "timestamp": "2025-12-05T17:30:00.000Z"
+}
+```
+
+**Caching**: Guide data is cached for 15 minutes. Historical data is retained in the database, but the API returns only current and upcoming programs.
+
+#### Search Program Guide
+```bash
+# Search by keyword
+curl "http://localhost:3000/api/guide/search?q=nature"
+
+# Search on specific channel
+curl "http://localhost:3000/api/guide/search?q=news&channel=2.1"
+
+# Limit results
+curl "http://localhost:3000/api/guide/search?q=sports&limit=10"
+```
+
+Response:
+```json
+{
+  "results": [
+    {
+      "guide_number": "2.1",
+      "guide_name": "WGBHDT",
+      "series_id": "C185481ENLBRX",
+      "title": "Nature",
+      "episode_number": "S42E12",
+      "episode_title": "Saving the Animals of Ukraine",
+      "synopsis": "Documentary about rescuing animals...",
+      "start_time": 1764961200,
+      "end_time": 1764966600,
+      "image_url": "https://img.hdhomerun.com/titles/C185481ENLBRX.jpg"
+    }
+  ],
+  "count": 1,
+  "query": "nature",
+  "filters": {
+    "limit": 50
+  }
+}
+```
+
+**Note**: Search looks in title, episode title, and synopsis fields. Results span up to 7 days.
+
+#### What's On Now
+```bash
+curl http://localhost:3000/api/guide/now
+```
+
+Response:
+```json
+{
+  "programs": [
+    {
+      "guide_number": "2.1",
+      "guide_name": "WGBHDT",
+      "affiliate": "PBS",
+      "series_id": "C7879062ENTLJH",
+      "title": "PBS News Hour",
+      "episode_number": "S52E114",
+      "episode_title": null,
+      "start_time": 1764975600,
+      "end_time": 1764979200,
+      "image_url": "https://img.hdhomerun.com/titles/C7879062ENTLJH.jpg"
+    }
+  ],
+  "count": 45,
+  "timestamp": "2025-12-05T18:00:00.000Z"
+}
+```
+
+**Note**: Returns currently airing programs across all channels at the time of the request.
+
+### Recording Rules
+
+#### List Recording Rules
+```bash
+curl http://localhost:3000/api/recording-rules
+```
+
+Response:
+```json
+{
+  "rules": [
+    {
+      "RecordingRuleID": "7897331",
+      "SeriesID": "C18361200EN88S3",
+      "Title": "All Creatures Great and Small on Masterpiece",
+      "Synopsis": "James Alfred Wight's series of books...",
+      "ImageURL": "https://img.hdhomerun.com/titles/C18361200EN88S3.jpg",
+      "ChannelOnly": "2.1",
+      "RecentOnly": 1,
+      "Priority": 10,
+      "StartPadding": 30,
+      "EndPadding": 30
+    }
+  ],
+  "count": 1,
+  "timestamp": "2025-12-05T17:30:00.000Z"
+}
+```
+
+**Note**: Fetches fresh data from HDHomeRun cloud API on every request. Rules are automatically synced to local cache.
+
+#### Create Recording Rule
+```bash
+# Schedule series recording for new episodes only
+curl -X POST http://localhost:3000/api/recording-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "SeriesID": "C185481ENLBRX",
+    "RecentOnly": true,
+    "ChannelOnly": "2.1",
+    "StartPadding": 60,
+    "EndPadding": 120
+  }'
+
+# Record all airings
+curl -X POST http://localhost:3000/api/recording-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "SeriesID": "C184056EN6FJY",
+    "ChannelOnly": "4.1|5.1"
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Recording rule created",
+  "params": {
+    "SeriesID": "C185481ENLBRX",
+    "RecentOnly": true,
+    "ChannelOnly": "2.1",
+    "StartPadding": 60,
+    "EndPadding": 120
+  }
+}
+```
+
+**Parameters**:
+- `SeriesID` (required): Series identifier from program guide
+- `ChannelOnly` (optional): Pipe-separated channel numbers (e.g., "2.1|4.1")
+- `TeamOnly` (optional): Pipe-separated team names for sports
+- `RecentOnly` (boolean): Only record new episodes (default: false)
+- `AfterOriginalAirdateOnly` (number): Unix timestamp - only record episodes that originally aired after this date
+- `DateTimeOnly` (number): Unix timestamp for one-time recording
+- `StartPadding` (number): Seconds to record before start (default: 30)
+- `EndPadding` (number): Seconds to record after end (default: 30)
+
+**Side Effects**: Updates cloud API → notifies all HDHomeRun devices → updates local cache
+
+#### Delete Recording Rule
+```bash
+curl -X DELETE http://localhost:3000/api/recording-rules/7897331
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Recording rule deleted",
+  "recordingRuleId": "7897331"
+}
+```
+
+**Side Effects**: Deletes from cloud API → notifies all devices → removes from local cache
+
+#### Change Recording Rule Priority
+```bash
+# Move rule to second position (after rule 7939758)
+curl -X PUT http://localhost:3000/api/recording-rules/7897331/priority \
+  -H "Content-Type: application/json" \
+  -d '{"afterRecordingRuleId": "7939758"}'
+
+# Move to highest priority (first position)
+curl -X PUT http://localhost:3000/api/recording-rules/7897331/priority \
+  -H "Content-Type: application/json" \
+  -d '{"afterRecordingRuleId": "0"}'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Recording rule priority updated",
+  "recordingRuleId": "7897331",
+  "afterRecordingRuleId": "7939758"
+}
+```
+
+**Note**: Priority determines which recordings are kept when storage space is limited.
+
+#### Get Specific Recording Rule
+```bash
+curl http://localhost:3000/api/recording-rules/7897331
+```
+
+Response:
+```json
+{
+  "recording_rule_id": "7897331",
+  "series_id": "C18361200EN88S3",
+  "title": "All Creatures Great and Small on Masterpiece",
+  "synopsis": "...",
+  "image_url": "https://...",
+  "channel_only": "2.1",
+  "recent_only": 1,
+  "priority": 10,
+  "start_padding": 30,
+  "end_padding": 30
+}
+```
+
+#### Check Recording Rule for Series
+```bash
+curl http://localhost:3000/api/series/C185481ENLBRX/recording-rule
+```
+
+Response:
+```json
+{
+  "seriesId": "C185481ENLBRX",
+  "hasRecordingRule": true,
+  "rules": [
+    {
+      "recording_rule_id": "7920372",
+      "series_id": "C185481ENLBRX",
+      "title": "Nature",
+      "channel_only": null,
+      "recent_only": 0,
+      "priority": 8
+    }
+  ]
+}
+```
+
+**Note**: Returns all recording rules for the specified series. Useful for checking if a show is already scheduled before creating a new rule.
+
 ## Configuration
 
 ### Environment Variables
@@ -391,6 +672,9 @@ The SQLite database (`hdhomerun.db`) is automatically created on first run in th
 - **src/discovery.js**: Multi-method HDHomeRun device discovery engine
 - **src/dvr.js**: DVR content retrieval and management
 - **src/database.js**: SQLite persistence layer with CRUD operations
+- **src/guide.js**: Program guide manager with intelligent caching
+- **src/recording-rules.js**: Recording rules manager via cloud API
+- **src/hls-stream.js**: HLS transcoding and streaming manager
 - **src/index.js**: CLI discovery tool (accessed via `npm run scan`)
 
 ### Discovery Protocol
@@ -401,13 +685,16 @@ See `HDHOMERUN_PROTOCOL.md` for complete protocol documentation.
 
 ### Database Schema
 
-Comprehensive SQLite schema with three main tables:
+Comprehensive SQLite schema with six main tables:
 
 - **devices**: HDHomeRun device tracking with capabilities
 - **series**: Show metadata with automatic statistics
 - **episodes**: Individual recording details with playback state
+- **guide_channels**: Program guide channel information cache
+- **guide_programs**: EPG data with historical retention
+- **recording_rules**: Recording rules cache synced from cloud
 
-The schema includes views, triggers, and indexes for efficient queries and automatic data integrity.
+The schema includes views (current_guide, recording_rules_detail), triggers, and indexes for efficient queries and automatic data integrity. Guide tables are automatically created on first run.
 
 ## Development
 
@@ -426,19 +713,22 @@ npm run dev
 ```
 tvhomerun-backend/
 ├── src/
-│   ├── server.js           # Main API server
-│   ├── index.js            # CLI discovery tool
-│   ├── discovery.js        # Device discovery
-│   ├── dvr.js              # DVR content management
-│   ├── database.js         # SQLite operations
-│   ├── hls-stream.js       # HLS transcoding manager
-│   ├── progress.js         # Progress management tool (local DB)
-│   ├── device-progress.js  # Progress management tool (with device sync)
-│   └── compare-progress.js # Batch progress comparison tool
-├── schema.sql              # Database schema
-├── CLAUDE.md               # Development guidelines
-├── HDHOMERUN_PROTOCOL.md   # Protocol documentation
-├── DEVELOPMENT_LOG.md      # Development discoveries and notes
+│   ├── server.js              # Main API server
+│   ├── index.js               # CLI discovery tool
+│   ├── discovery.js           # Device discovery
+│   ├── dvr.js                 # DVR content management
+│   ├── database.js            # SQLite operations
+│   ├── guide.js               # Program guide manager
+│   ├── recording-rules.js     # Recording rules manager
+│   ├── hls-stream.js          # HLS transcoding manager
+│   ├── progress.js            # Progress management tool (local DB)
+│   ├── device-progress.js     # Progress management tool (with device sync)
+│   └── compare-progress.js    # Batch progress comparison tool
+├── schema.sql                 # Database schema (includes guide tables)
+├── CLAUDE.md                  # Development guidelines
+├── HDHOMERUN_PROTOCOL.md      # Protocol documentation
+├── GUIDE-AND-RECORDING-API.md # Guide and recording API documentation
+├── DEVELOPMENT_LOG.md         # Development discoveries and notes
 ├── package.json
 └── README.md
 ```
@@ -473,6 +763,26 @@ const search = await axios.get('http://localhost:3000/api/shows?search=news');
 
 // Get episodes for a show
 const episodes = await axios.get(`http://localhost:3000/api/shows/1/episodes`);
+
+// Get program guide
+const guide = await axios.get('http://localhost:3000/api/guide');
+console.log(`Found ${guide.data.channels} channels`);
+
+// Search for a program
+const programs = await axios.get('http://localhost:3000/api/guide/search?q=nature');
+console.log(`Found ${programs.data.count} matching programs`);
+
+// Schedule a recording
+const rule = await axios.post('http://localhost:3000/api/recording-rules', {
+  SeriesID: 'C185481ENLBRX',
+  RecentOnly: true,
+  ChannelOnly: '2.1'
+});
+console.log(`Created recording rule ${rule.data.params.SeriesID}`);
+
+// List recording rules
+const rules = await axios.get('http://localhost:3000/api/recording-rules');
+console.log(`Found ${rules.data.count} recording rules`);
 ```
 
 ### Python
@@ -486,6 +796,28 @@ episodes = response.json()
 
 for episode in episodes:
     print(f"{episode['series_title']} - {episode['episode_title']}")
+
+# Get program guide and find shows
+guide_response = requests.get('http://localhost:3000/api/guide')
+guide = guide_response.json()
+
+print(f"Found {guide['channels']} channels")
+
+# Search for a specific program
+search = requests.get('http://localhost:3000/api/guide/search', params={'q': 'news'})
+programs = search.json()
+
+for program in programs['results']:
+    print(f"{program['title']} on {program['guide_name']}")
+
+# Schedule a recording for a series
+recording_rule = {
+    'SeriesID': 'C185481ENLBRX',
+    'RecentOnly': True,
+    'ChannelOnly': '2.1'
+}
+response = requests.post('http://localhost:3000/api/recording-rules', json=recording_rule)
+print(f"Recording rule created: {response.json()['message']}")
 ```
 
 ### Shell Script
