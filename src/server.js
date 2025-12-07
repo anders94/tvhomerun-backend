@@ -4,12 +4,14 @@ const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
+const db = require('asynqlite');
 const HDHomeRunDiscovery = require('./discovery');
 const HDHomeRunDVR = require('./dvr');
 const HDHomeRunDatabase = require('./database');
 const HLSStreamManager = require('./hls-stream');
 const GuideManager = require('./guide');
 const RecordingRulesManager = require('./recording-rules');
+const TunerManager = require('./live-tv');
 
 class HDHomeRunServer {
   constructor(options = {}) {
@@ -23,6 +25,22 @@ class HDHomeRunServer {
     this.isDiscovering = false;
     this.lastDiscovery = null;
     this.isBulkCaching = false;
+
+    // Live TV configuration
+    this.liveTVEnabled = options.liveTV !== false; // Enabled by default
+    this.liveTVConfig = {
+      enabled: this.liveTVEnabled,
+      cacheDir: 'live-cache',
+      bufferMinutes: 60,
+      segmentDuration: 6,
+      clientHeartbeat: 30,
+      missedHeartbeats: 2,
+      tunerCooldown: 300,
+      pruneInterval: 30,
+      maxViewersPerTuner: 10,
+      ...options.liveTVConfig
+    };
+    this.tunerManager = null;
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -800,6 +818,184 @@ class HDHomeRunServer {
       }
     });
 
+    // Live TV endpoints
+
+    if (this.liveTVEnabled) {
+      // Get available channels
+      this.app.get('/api/live/channels', async (req, res) => {
+        try {
+          // Return channel lineup from guide data
+          const channels = await db.run(`
+            SELECT DISTINCT guide_number, guide_name, affiliate, image_url
+            FROM guide_channels
+            ORDER BY CAST(guide_number AS REAL)
+          `);
+
+          res.json({
+            channels,
+            count: channels.length,
+            timestamp: new Date().toISOString()
+          });
+        } catch (error) {
+          this.log(`Error getting live channels: ${error.message}`);
+          res.status(500).json({
+            error: 'Failed to retrieve channel lineup',
+            details: error.message
+          });
+        }
+      });
+
+      // Start watching a channel
+      this.app.post('/api/live/watch', async (req, res) => {
+        try {
+          const { channelNumber, clientId } = req.body;
+
+          if (!channelNumber || !clientId) {
+            return res.status(400).json({
+              error: 'Missing required parameters',
+              message: 'channelNumber and clientId are required'
+            });
+          }
+
+          const tunerId = await this.tunerManager.allocateTuner(channelNumber, clientId);
+
+          if (!tunerId) {
+            return res.status(503).json({
+              error: 'No tuners available',
+              message: 'All tuners are currently in use. Please try again later.'
+            });
+          }
+
+          res.json({
+            success: true,
+            tunerId,
+            playlistUrl: `/api/live/${tunerId}/playlist.m3u8`,
+            channelNumber,
+            message: 'Stream starting, playlist will be available shortly'
+          });
+        } catch (error) {
+          this.log(`Error starting live stream: ${error.message}`);
+          res.status(500).json({
+            error: 'Failed to start live stream',
+            details: error.message
+          });
+        }
+      });
+
+      // Keep-alive heartbeat
+      this.app.post('/api/live/heartbeat', async (req, res) => {
+        try {
+          const { clientId } = req.body;
+
+          if (!clientId) {
+            return res.status(400).json({
+              error: 'Missing required parameter',
+              message: 'clientId is required'
+            });
+          }
+
+          const success = await this.tunerManager.heartbeat(clientId);
+
+          if (!success) {
+            return res.status(404).json({
+              error: 'Client not found',
+              message: 'No active session found for this client'
+            });
+          }
+
+          res.json({
+            success: true,
+            timestamp: new Date().toISOString()
+          });
+        } catch (error) {
+          this.log(`Error updating heartbeat: ${error.message}`);
+          res.status(500).json({
+            error: 'Failed to update heartbeat',
+            details: error.message
+          });
+        }
+      });
+
+      // Stop watching
+      this.app.post('/api/live/stop', async (req, res) => {
+        try {
+          const { clientId } = req.body;
+
+          if (!clientId) {
+            return res.status(400).json({
+              error: 'Missing required parameter',
+              message: 'clientId is required'
+            });
+          }
+
+          await this.tunerManager.releaseViewer(clientId);
+
+          res.json({
+            success: true,
+            message: 'Viewer released successfully'
+          });
+        } catch (error) {
+          this.log(`Error stopping live stream: ${error.message}`);
+          res.status(500).json({
+            error: 'Failed to stop live stream',
+            details: error.message
+          });
+        }
+      });
+
+      // Serve HLS playlist
+      this.app.get('/api/live/:tunerId/playlist.m3u8', (req, res) => {
+        const { tunerId } = req.params;
+        const filePath = path.join(this.liveTVConfig.cacheDir, tunerId, 'playlist.m3u8');
+        res.sendFile(path.resolve(filePath), (err) => {
+          if (err) {
+            this.debug(`Error serving playlist for ${tunerId}: ${err.message}`);
+            res.status(404).json({
+              error: 'Playlist not found',
+              message: 'Stream may still be starting or has ended'
+            });
+          }
+        });
+      });
+
+      // Serve HLS segments
+      this.app.get('/api/live/:tunerId/:segment', (req, res) => {
+        const { tunerId, segment } = req.params;
+
+        // Only allow .ts files
+        if (!segment.endsWith('.ts')) {
+          return res.status(400).json({ error: 'Invalid segment file' });
+        }
+
+        const filePath = path.join(this.liveTVConfig.cacheDir, tunerId, segment);
+        res.sendFile(path.resolve(filePath), (err) => {
+          if (err) {
+            this.debug(`Error serving segment ${segment} for ${tunerId}: ${err.message}`);
+            res.status(404).json({ error: 'Segment not found' });
+          }
+        });
+      });
+
+      // Get tuner status (admin endpoint)
+      this.app.get('/api/live/tuners', async (req, res) => {
+        try {
+          const tuners = await this.tunerManager.getTunerStatus();
+
+          res.json({
+            tuners,
+            count: tuners.length,
+            timestamp: new Date().toISOString()
+          });
+        } catch (error) {
+          this.log(`Error getting tuner status: ${error.message}`);
+          res.status(500).json({
+            error: 'Failed to retrieve tuner status',
+            details: error.message
+          });
+        }
+      });
+    }
+
     // HLS Streaming endpoints
 
     // Get HLS playlist for an episode
@@ -967,6 +1163,31 @@ class HDHomeRunServer {
     });
   }
 
+  async registerTunersForLiveTV(devices) {
+    this.debug('[LiveTV] Registering tuners from discovered devices...');
+
+    for (const device of devices) {
+      try {
+        // Get tuner status from device
+        const statusUrl = `http://${device.ip}/status.json`;
+        const response = await axios.get(statusUrl, { timeout: 5000 });
+        const tunerStatus = response.data;
+
+        // Register each tuner
+        for (const tuner of tunerStatus) {
+          if (tuner.Resource && tuner.Resource.startsWith('tuner')) {
+            const tunerIndex = parseInt(tuner.Resource.replace('tuner', ''));
+            await this.tunerManager.registerTuner(device.DeviceID, device.ip, tunerIndex);
+          }
+        }
+
+        this.debug(`[LiveTV] Registered ${tunerStatus.length} tuners for device ${device.DeviceID}`);
+      } catch (error) {
+        this.debug(`[LiveTV] Failed to register tuners for ${device.DeviceID}: ${error.message}`);
+      }
+    }
+  }
+
   async runDiscovery() {
     if (this.isDiscovering) {
       this.debug('Discovery already in progress, skipping');
@@ -1020,6 +1241,11 @@ class HDHomeRunServer {
 
       this.lastDiscovery = new Date().toISOString();
       this.log(`Discovery completed successfully at ${this.lastDiscovery}`);
+
+      // Register tuners for live TV
+      if (this.liveTVEnabled && this.tunerManager) {
+        await this.registerTunersForLiveTV(devices);
+      }
 
       // Start bulk HLS conversion if pre-cache is enabled
       if (this.preCache && !this.isBulkCaching) {
@@ -1106,6 +1332,13 @@ class HDHomeRunServer {
       this.log('Initializing HLS stream manager...');
       await this.hlsManager.initialize();
 
+      // Initialize Live TV tuner manager
+      if (this.liveTVEnabled) {
+        this.log('Initializing Live TV tuner manager...');
+        this.tunerManager = new TunerManager(this.liveTVConfig);
+        await this.tunerManager.initialize();
+      }
+
       // Setup scheduled discovery
       this.setupScheduler();
 
@@ -1135,6 +1368,14 @@ class HDHomeRunServer {
         this.log('  GET /api/recording-rules - List recording rules');
         this.log('  POST /api/recording-rules - Create recording rule');
         this.log('  DELETE /api/recording-rules/:id - Delete recording rule');
+        if (this.liveTVEnabled) {
+          this.log('  GET /api/live/channels - Get channel lineup');
+          this.log('  POST /api/live/watch - Start watching channel');
+          this.log('  POST /api/live/heartbeat - Client heartbeat');
+          this.log('  POST /api/live/stop - Stop watching');
+          this.log('  GET /api/live/:tunerId/playlist.m3u8 - Live TV HLS playlist');
+          this.log('  GET /api/live/tuners - Tuner status (admin)');
+        }
         this.log('  GET /api/stream/:episodeId/playlist.m3u8 - HLS stream');
         this.log('  GET /api/stream/:episodeId/status - Transcode status');
       });

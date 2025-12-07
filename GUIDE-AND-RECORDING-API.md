@@ -140,6 +140,37 @@ Get what's currently playing on all channels
 
 ### Recording Rules Endpoints
 
+**Understanding Recording Rules:**
+
+Recording rules are **series-based**, not episode-based. When you create a recording rule, you're telling the HDHomeRun to record a series (identified by `SeriesID`), but you control what episodes get recorded using parameters:
+
+- **Record ALL episodes** (default): Every airing including reruns
+  ```json
+  {"SeriesID": "C185481ENLBRX"}
+  ```
+
+- **Record ONLY NEW episodes**: Use `RecentOnly: true` to skip reruns
+  ```json
+  {"SeriesID": "C185481ENLBRX", "RecentOnly": true}
+  ```
+
+- **Record ONE SPECIFIC episode**: Use `DateTimeOnly` with Unix timestamp
+  ```json
+  {"SeriesID": "C185481ENLBRX", "DateTimeOnly": 1764961200}
+  ```
+
+- **Record episodes after a date**: Use `AfterOriginalAirdateOnly` with Unix timestamp
+  ```json
+  {"SeriesID": "C185481ENLBRX", "AfterOriginalAirdateOnly": 1704067200}
+  ```
+
+- **Limit to specific channels**: Use `ChannelOnly` (pipe-separated for multiple)
+  ```json
+  {"SeriesID": "C185481ENLBRX", "ChannelOnly": "2.1|4.1"}
+  ```
+
+**Note**: You cannot schedule a single episode without creating a series rule. Use `DateTimeOnly` for one-time recordings.
+
 #### `GET /api/recording-rules`
 List all recording rules (always fetches fresh from cloud)
 

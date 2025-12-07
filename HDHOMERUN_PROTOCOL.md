@@ -6,12 +6,13 @@ This document provides a comprehensive overview of the HDHomeRun device discover
 
 1. [Device Discovery Protocol](#device-discovery-protocol)
 2. [HTTP API Endpoints](#http-api-endpoints)
-3. [DVR Content Access](#dvr-content-access)
-4. [Recording Rules Management](#recording-rules-management)
-5. [Program Guide API](#program-guide-api)
-6. [Updating DVR Content](#updating-dvr-content)
-7. [Implementation Guide](#implementation-guide)
-8. [External References](#external-references)
+3. [Live TV Streaming](#live-tv-streaming)
+4. [DVR Content Access](#dvr-content-access)
+5. [Recording Rules Management](#recording-rules-management)
+6. [Program Guide API](#program-guide-api)
+7. [Updating DVR Content](#updating-dvr-content)
+8. [Implementation Guide](#implementation-guide)
+9. [External References](#external-references)
 
 ## Device Discovery Protocol
 
@@ -190,10 +191,364 @@ All HTTP endpoints use the device's IP address discovered via UDP protocol.
 To detect DVR storage capability, check for:
 
 1. **StorageURL field** in `/discover.json`
-2. **Successful response** from `/recorded_files.json`  
+2. **Successful response** from `/recorded_files.json`
 3. **Storage API endpoints** (less common):
    - `/api/storage`
    - `/storage.json`
+
+## Live TV Streaming
+
+HDHomeRun devices provide live TV streaming via HTTP in MPEG Transport Stream (MPEG-TS) format.
+
+### Stream URL Format
+
+```
+http://[device-ip]:5004/[tuner]/v[channel]
+```
+
+**Components:**
+- `[device-ip]`: Device IP address (e.g., `192.168.1.100`)
+- `[tuner]`: Tuner selector
+  - `/auto/` - Automatic tuner selection (first available)
+  - `/tuner0/`, `/tuner1/`, `/tuner2/`, `/tuner3/` - Specific tuner
+- `v[channel]`: Virtual channel number (e.g., `v2.1`, `v5.1`)
+
+**Examples:**
+```
+http://192.168.1.100:5004/auto/v2.1        # Auto tuner, channel 2.1
+http://192.168.1.100:5004/tuner0/v5.1      # Specific tuner 0, channel 5.1
+http://192.168.1.100:5004/tuner1/ch473000000  # RF frequency tuning
+```
+
+### Alternative Channel Formats
+
+**RF Frequency:**
+```
+ch473000000              # Frequency in Hz
+ch473000000-3            # Frequency + program number
+```
+
+**Auto Tuning:**
+```
+auto:9                   # Auto-detect modulation, channel 9
+qam:33                   # QAM modulation, channel 33
+```
+
+### Optional Query Parameters
+
+**Duration Limit:**
+```
+?duration=<seconds>
+```
+Automatically closes stream after specified duration.
+
+**Transcoding (EXTEND models only):**
+```
+?transcode=<profile>
+```
+
+Available profiles:
+- `heavy` - High quality transcode
+- `mobile` - Mobile device optimization
+- `internet540`, `internet480`, `internet360`, `internet240` - Resolution-specific
+
+**Example:**
+```
+http://192.168.1.100:5004/auto/v2.1?duration=3600&transcode=mobile
+```
+
+### Tuner Allocation & Management
+
+**Automatic Allocation:**
+1. HTTP connection initiates tuner allocation
+2. Channel is authorized and tuned automatically
+3. PID filter configured automatically
+4. Stream delivered continuously over TCP
+5. Tuner released when connection closes
+
+**No Explicit Locking Required:**
+The HTTP connection itself holds the tuner. No separate locking mechanism needed for HTTP streaming.
+
+**Tuner Availability:**
+- `/auto/` selects first available tuner
+- Returns HTTP error if all tuners busy
+- Specific tuner requests (`/tuner0/`) return error if that tuner is in use
+
+### Error Handling
+
+Errors returned via HTTP header: `X-HDHomeRun-Error`
+
+**Common Error Codes:**
+- **805** - All tuners in use (no tuners available)
+- **804** - Specified tuner in use (when requesting specific tuner)
+- **811** - Content protection required (DRM/encrypted content)
+
+**Example:**
+```
+HTTP/1.1 503 Service Unavailable
+X-HDHomeRun-Error: 805
+Content-Length: 0
+```
+
+**Error Handling Strategy:**
+```javascript
+const response = await axios.get(streamUrl, {
+  validateStatus: () => true  // Don't throw on non-2xx
+});
+
+if (response.status === 503) {
+  const errorCode = response.headers['x-hdhomerun-error'];
+  if (errorCode === '805') {
+    throw new Error('All tuners are currently in use');
+  } else if (errorCode === '811') {
+    throw new Error('Channel requires subscription/authentication');
+  }
+}
+```
+
+### Channel Lineup Discovery
+
+#### `/lineup.json`
+**Method:** GET
+**Description:** Returns all available channels with streaming URLs
+
+**Response:**
+```json
+[
+  {
+    "GuideNumber": "2.1",
+    "GuideName": "WGBH-HD",
+    "VideoCodec": "MPEG2",
+    "AudioCodec": "AC3",
+    "HD": 1,
+    "SignalStrength": 100,
+    "SignalQuality": 74,
+    "URL": "http://192.168.0.37:5004/auto/v2.1"
+  },
+  {
+    "GuideNumber": "5.1",
+    "GuideName": "WCVB-HD",
+    "VideoCodec": "H264",
+    "AudioCodec": "AAC",
+    "HD": 1,
+    "Favorite": 1,
+    "SignalStrength": 95,
+    "SignalQuality": 80,
+    "URL": "http://192.168.0.37:5004/auto/v5.1"
+  }
+]
+```
+
+**Key Fields:**
+- `GuideNumber`: Virtual channel number (user-facing channel)
+- `GuideName`: Station call sign
+- `URL`: Ready-to-use streaming URL
+- `VideoCodec`: `MPEG2`, `H264`, `HEVC`
+- `AudioCodec`: `AC3`, `AAC`, `EAC3`
+- `HD`: `1` for HD, `0` for SD
+- `SignalStrength`: 0-100
+- `SignalQuality`: 0-100
+- `Favorite`: `1` if marked as favorite
+- `DRM`: `1` if content protected
+
+**Alternative Formats:**
+```
+/lineup.xml    # XML format
+/lineup.m3u    # M3U playlist format
+```
+
+### Tuner Status Monitoring
+
+#### `/status.json`
+**Method:** GET
+**Description:** Real-time tuner status and usage
+
+**Response:**
+```json
+[
+  {
+    "Resource": "tuner0",
+    "InUse": 1,
+    "VctNumber": "7.1",
+    "VctName": "WHDH-HD",
+    "Frequency": 177000000,
+    "ProgramNumber": 1,
+    "LockSupported": 1,
+    "SignalStrength": 100,
+    "SignalQuality": 100,
+    "NetworkRate": 19392000,
+    "TargetIP": "192.168.1.50"
+  },
+  {
+    "Resource": "tuner1",
+    "InUse": 0
+  },
+  {
+    "Resource": "tuner2",
+    "InUse": 1,
+    "VctNumber": "2.1",
+    "VctName": "WGBH-HD",
+    "Frequency": 179000000,
+    "SignalStrength": 100,
+    "SignalQuality": 95
+  },
+  {
+    "Resource": "tuner3",
+    "InUse": 0
+  }
+]
+```
+
+**Key Fields:**
+- `Resource`: Tuner identifier (`tuner0`, `tuner1`, etc.)
+- `InUse`: `0` = available, `1` = in use
+- `VctNumber`: Currently tuned channel (when `InUse: 1`)
+- `VctName`: Station name (when `InUse: 1`)
+- `Frequency`: RF frequency in Hz
+- `SignalStrength`: 0-100 (when tuned)
+- `SignalQuality`: 0-100 (when tuned)
+- `TargetIP`: IP address of client receiving stream (when available)
+
+**Use Cases:**
+- Determine total tuner count
+- Check tuner availability before allocation
+- Identify which channel each tuner is streaming
+- Monitor signal quality
+- Detect which clients are connected
+
+**Polling Strategy:**
+```javascript
+// Poll every 30 seconds to track tuner usage
+setInterval(async () => {
+  const status = await axios.get('http://192.168.1.100/status.json');
+  const availableTuners = status.data.filter(t => t.InUse === 0).length;
+  console.log(`Available tuners: ${availableTuners}`);
+}, 30000);
+```
+
+### Stream Format Details
+
+**Format:** MPEG Transport Stream (MPEG-TS)
+**Delivery:** HTTP/TCP continuous stream
+**Codecs:** Varies by broadcast (MPEG2, H.264, HEVC, AC3, AAC, EAC3)
+
+**Bitrates (typical):**
+- HD channels: 10-20 Mbps
+- SD channels: 3-8 Mbps
+
+**Client Requirements:**
+Clients must implement adaptive timing to match the rate at which data arrives from the device. Do not assume fixed frame rates.
+
+### Transcoding to HLS
+
+For web/mobile playback, transcode MPEG-TS to HLS using FFmpeg:
+
+```bash
+# Basic transcoding (copy video if H.264, transcode audio)
+ffmpeg -i http://192.168.1.100:5004/auto/v2.1 \
+  -c:v copy \
+  -c:a aac \
+  -f hls \
+  -hls_time 6 \
+  -hls_list_size 10 \
+  -hls_flags delete_segments+append_list \
+  -hls_segment_filename /path/to/cache/segment-%d.ts \
+  /path/to/cache/playlist.m3u8
+
+# Transcode video (for MPEG2 sources)
+ffmpeg -i http://192.168.1.100:5004/auto/v2.1 \
+  -c:v libx264 -preset ultrafast -crf 23 \
+  -c:a aac -b:a 128k \
+  -f hls \
+  -hls_time 6 \
+  -hls_list_size 10 \
+  -hls_flags delete_segments+append_list \
+  -hls_segment_filename /path/to/cache/segment-%d.ts \
+  /path/to/cache/playlist.m3u8
+```
+
+**HLS Parameters:**
+- `-hls_time 6`: 6-second segments (standard)
+- `-hls_list_size 10`: Keep last 10 segments (60 seconds buffer)
+- `delete_segments`: Automatically prune old segments
+- `append_list`: Add segments to existing playlist
+
+**Benefits:**
+- Native iOS/Safari playback
+- Adaptive bitrate support
+- Client-side buffering
+- No Flash required
+
+### Advanced Tuner Control (Optional)
+
+For applications requiring explicit tuner control without HTTP streaming, use the UDP control API:
+
+**Lock a Tuner:**
+```
+set /tuner0/lockkey <random-32bit-number>
+set /tuner0/channel auto:9
+```
+
+**Release Lock:**
+```
+set /tuner0/lockkey none
+```
+
+**Force Unlock:**
+```
+set /tuner0/lockkey force
+```
+
+**Lock Timeout:**
+- Locks automatically expire after ~30 seconds of inactivity
+- No commands sent and no active stream = idle
+- Prevents orphaned locks from crashed applications
+
+**Note:** For HTTP streaming applications, explicit locking is unnecessary. The HTTP connection holds the tuner automatically.
+
+### Implementation Best Practices
+
+1. **Use `/auto/` for first stream** - Let device choose optimal tuner
+2. **Check `/status.json` before allocation** - Know available tuners
+3. **Handle error 805 gracefully** - All tuners busy
+4. **Keep HTTP connection alive** - Connection close releases tuner
+5. **Implement timeout on client side** - Detect stalled streams
+6. **Monitor signal quality** - Alert on poor signal (<70%)
+7. **Cache `/lineup.json`** - Minimize device queries
+8. **Respect DRM flags** - Don't attempt to stream protected content
+
+### Multi-Device Considerations
+
+When managing multiple HDHomeRun devices:
+
+```javascript
+// Track tuners per device
+const tunerPool = new Map();
+
+for (const device of devices) {
+  const status = await axios.get(`http://${device.ip}/status.json`);
+  for (const tuner of status.data) {
+    tunerPool.set(`${device.id}-${tuner.Resource}`, {
+      deviceId: device.id,
+      deviceIp: device.ip,
+      tunerIndex: tuner.Resource.replace('tuner', ''),
+      inUse: tuner.InUse === 1,
+      channel: tuner.VctNumber || null,
+      streamUrl: `http://${device.ip}:5004/${tuner.Resource}/v{channel}`
+    });
+  }
+}
+
+// Find available tuner
+function findAvailableTuner() {
+  for (const [tunerId, tuner] of tunerPool.entries()) {
+    if (!tuner.inUse) {
+      return tunerId;
+    }
+  }
+  return null; // All tuners busy
+}
+```
 
 ## DVR Content Access
 

@@ -38,6 +38,17 @@ class HDHomeRunDatabase {
       await this.createGuideSchema();
     }
 
+    // Check if live TV tables exist, if not create them (auto-migration)
+    const liveTables = await db.run(`
+      SELECT name FROM sqlite_master
+      WHERE type='table' AND name IN ('live_tuners', 'live_viewers')
+    `);
+
+    if (!liveTables || liveTables.length < 2) {
+      console.log('Live TV tables not found, creating live TV schema...');
+      await this.createLiveTVSchema();
+    }
+
     return db;
   }
 
@@ -957,6 +968,53 @@ class HDHomeRunDatabase {
             }
           } else {
             console.log('Guide schema created successfully');
+            resolve();
+          }
+        });
+      });
+    });
+  }
+
+  async createLiveTVSchema() {
+    // Create live TV streaming tables using native SQLite exec
+    const schemaPath = path.join(__dirname, '..', 'schema.sql');
+    const fullSchema = fs.readFileSync(schemaPath, 'utf-8');
+
+    // Extract the live TV schema section
+    const liveTVSchemaMatch = fullSchema.match(
+      /-- Live TV Streaming Tables[\s\S]*$/
+    );
+
+    if (!liveTVSchemaMatch) {
+      throw new Error('Could not find live TV schema in schema.sql');
+    }
+
+    const liveTVSchema = liveTVSchemaMatch[0];
+
+    // Use sqlite3 directly for batch execution (handles statement ordering)
+    const sqlite3 = require('sqlite3').verbose();
+    const dbPath = this.dbPath;
+
+    return new Promise((resolve, reject) => {
+      const sqliteDb = new sqlite3.Database(dbPath, (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        sqliteDb.exec(liveTVSchema, (err) => {
+          sqliteDb.close();
+
+          if (err) {
+            // Ignore "table already exists" errors
+            if (err.message.includes('already exists')) {
+              console.log('Live TV schema already exists (some tables present)');
+              resolve();
+            } else {
+              reject(err);
+            }
+          } else {
+            console.log('Live TV schema created successfully');
             resolve();
           }
         });

@@ -6,6 +6,7 @@ This is a backend server for TVHomeRun apps including [TVHomeRun tvOS](https://g
 
 - **Automatic Device Discovery**: Multi-method discovery using UDP broadcast, HTTP fallback, and network scanning
 - **DVR Content Management**: Access recorded shows, episodes, and metadata from HDHomeRun DVR devices
+- **Live TV Streaming**: Real-time HLS streaming from HDHomeRun tuners with multi-viewer support and automatic tuner management
 - **Program Guide**: Browse EPG data with intelligent 15-minute caching, search programs, and see what's on now
 - **Recording Rules Management**: Create, delete, and prioritize series recordings via HDHomeRun cloud API
 - **REST API**: Clean JSON endpoints for integration with web apps, mobile apps, or home automation systems
@@ -488,6 +489,18 @@ Response:
 
 ### Recording Rules
 
+**Understanding Recording Rules:**
+
+Recording rules are series-based, not episode-based. When you create a recording rule, you specify a series (by `SeriesID`), and you control what episodes get recorded using parameters:
+
+- **All episodes** (default): Records every airing including reruns
+- **New episodes only**: Use `RecentOnly: true` to skip reruns
+- **One specific episode**: Use `DateTimeOnly` with a Unix timestamp for one-time recordings
+- **Episodes after a date**: Use `AfterOriginalAirdateOnly` with a Unix timestamp
+- **Specific channels**: Use `ChannelOnly` to limit recording to certain channels
+
+You cannot schedule a single episode without creating a series rule. For one-time recordings, create a rule with `DateTimeOnly`.
+
 #### List Recording Rules
 ```bash
 curl http://localhost:3000/api/recording-rules
@@ -653,6 +666,47 @@ Response:
 
 **Note**: Returns all recording rules for the specified series. Useful for checking if a show is already scheduled before creating a new rule.
 
+### Live TV
+
+The server provides real-time live TV streaming from HDHomeRun tuners via HLS. The system manages a dynamic pool of tuners across multiple devices and supports multiple viewers on the same channel.
+
+**Key Features**:
+- Dynamic tuner allocation from all discovered HDHomeRun devices
+- Intelligent stream reuse (multiple viewers share same tuner)
+- Picture-in-picture support (clients can watch multiple channels)
+- Automatic client lifecycle tracking via heartbeat monitoring
+- Configurable rolling HLS buffer (default: 60 minutes)
+- Automatic tuner cleanup when idle
+
+**Quick Start**:
+
+```bash
+# Get available channels
+curl http://localhost:3000/api/live/channels
+
+# Start watching a channel
+curl -X POST http://localhost:3000/api/live/watch \
+  -H "Content-Type: application/json" \
+  -d '{"channelNumber":"2.1","clientId":"my-unique-client-id"}'
+
+# Returns: {"tunerId":"10AA5474-tuner-0","playlistUrl":"/api/live/10AA5474-tuner-0/playlist.m3u8"}
+
+# Send heartbeat (every 25-30 seconds)
+curl -X POST http://localhost:3000/api/live/heartbeat \
+  -H "Content-Type: application/json" \
+  -d '{"clientId":"my-unique-client-id"}'
+
+# Stop watching
+curl -X POST http://localhost:3000/api/live/stop \
+  -H "Content-Type: application/json" \
+  -d '{"clientId":"my-unique-client-id"}'
+
+# Check tuner status (admin)
+curl http://localhost:3000/api/live/tuners
+```
+
+**For complete Live TV API documentation**, including client implementation guides, configuration options, and troubleshooting, see [LIVE-TV-API.md](LIVE-TV-API.md).
+
 ## Configuration
 
 ### Environment Variables
@@ -674,7 +728,9 @@ The SQLite database (`hdhomerun.db`) is automatically created on first run in th
 - **src/database.js**: SQLite persistence layer with CRUD operations
 - **src/guide.js**: Program guide manager with intelligent caching
 - **src/recording-rules.js**: Recording rules manager via cloud API
-- **src/hls-stream.js**: HLS transcoding and streaming manager
+- **src/hls-stream.js**: HLS transcoding and streaming manager for DVR recordings
+- **src/live-tv.js**: Live TV tuner manager with dynamic tuner pool and viewer tracking
+- **src/live-stream.js**: Live TV FFmpeg transcoding manager for real-time HLS streams
 - **src/index.js**: CLI discovery tool (accessed via `npm run scan`)
 
 ### Discovery Protocol
@@ -685,7 +741,7 @@ See `HDHOMERUN_PROTOCOL.md` for complete protocol documentation.
 
 ### Database Schema
 
-Comprehensive SQLite schema with six main tables:
+Comprehensive SQLite schema with eight main tables:
 
 - **devices**: HDHomeRun device tracking with capabilities
 - **series**: Show metadata with automatic statistics
@@ -693,8 +749,10 @@ Comprehensive SQLite schema with six main tables:
 - **guide_channels**: Program guide channel information cache
 - **guide_programs**: EPG data with historical retention
 - **recording_rules**: Recording rules cache synced from cloud
+- **live_tuners**: Live TV tuner pool with state tracking
+- **live_viewers**: Active viewer sessions with heartbeat monitoring
 
-The schema includes views (current_guide, recording_rules_detail), triggers, and indexes for efficient queries and automatic data integrity. Guide tables are automatically created on first run.
+The schema includes views (current_guide, recording_rules_detail, live_tuners_status), triggers, and indexes for efficient queries and automatic data integrity. Guide and live TV tables are automatically created on first run.
 
 ## Development
 
@@ -720,14 +778,17 @@ tvhomerun-backend/
 │   ├── database.js            # SQLite operations
 │   ├── guide.js               # Program guide manager
 │   ├── recording-rules.js     # Recording rules manager
-│   ├── hls-stream.js          # HLS transcoding manager
+│   ├── hls-stream.js          # HLS transcoding manager (DVR)
+│   ├── live-tv.js             # Live TV tuner manager
+│   ├── live-stream.js         # Live TV streaming manager
 │   ├── progress.js            # Progress management tool (local DB)
 │   ├── device-progress.js     # Progress management tool (with device sync)
 │   └── compare-progress.js    # Batch progress comparison tool
-├── schema.sql                 # Database schema (includes guide tables)
+├── schema.sql                 # Database schema (includes guide and live TV tables)
 ├── CLAUDE.md                  # Development guidelines
 ├── HDHOMERUN_PROTOCOL.md      # Protocol documentation
 ├── GUIDE-AND-RECORDING-API.md # Guide and recording API documentation
+├── LIVE-TV-API.md             # Live TV streaming API documentation
 ├── DEVELOPMENT_LOG.md         # Development discoveries and notes
 ├── package.json
 └── README.md

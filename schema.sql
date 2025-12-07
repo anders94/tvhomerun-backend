@@ -373,3 +373,57 @@ FROM recording_rules rr
 LEFT JOIN series s ON s.series_id = rr.series_id
 LEFT JOIN episodes e ON e.series_id = s.id
 GROUP BY rr.recording_rule_id;
+
+-- Live TV Streaming Tables
+-- Track tuners from all discovered HDHomeRun devices for live TV streaming
+
+CREATE TABLE IF NOT EXISTS live_tuners (
+    id TEXT PRIMARY KEY,                    -- "{deviceId}-tuner-{index}"
+    device_id TEXT NOT NULL,                -- References devices(device_id)
+    tuner_index INTEGER NOT NULL,           -- Tuner number (0, 1, 2, 3)
+    channel_number TEXT,                    -- Currently tuned channel (e.g., "2.1")
+    state TEXT NOT NULL DEFAULT 'idle',     -- idle, active, cooldown, offline
+    stream_pid INTEGER,                     -- FFmpeg process ID (when active)
+    hls_path TEXT,                          -- Path to HLS cache directory
+    started_at DATETIME,                    -- When stream started
+    last_accessed DATETIME,                 -- Last viewer activity
+    viewer_count INTEGER DEFAULT 0,         -- Number of active viewers
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE,
+    UNIQUE(device_id, tuner_index)
+);
+
+CREATE TABLE IF NOT EXISTS live_viewers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tuner_id TEXT NOT NULL,                 -- References live_tuners(id)
+    client_id TEXT NOT NULL UNIQUE,         -- Unique client identifier (UUID)
+    channel_number TEXT NOT NULL,           -- Channel being watched
+    last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (tuner_id) REFERENCES live_tuners(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_live_tuners_device ON live_tuners(device_id);
+CREATE INDEX IF NOT EXISTS idx_live_tuners_state ON live_tuners(state);
+CREATE INDEX IF NOT EXISTS idx_live_viewers_tuner ON live_viewers(tuner_id);
+CREATE INDEX IF NOT EXISTS idx_live_viewers_heartbeat ON live_viewers(last_heartbeat);
+
+-- View for live tuner status with device information
+CREATE VIEW IF NOT EXISTS live_tuners_status AS
+SELECT
+    lt.id as tuner_id,
+    lt.device_id,
+    d.friendly_name as device_name,
+    d.ip_address as device_ip,
+    lt.tuner_index,
+    lt.channel_number,
+    lt.state,
+    lt.viewer_count,
+    lt.started_at,
+    lt.last_accessed,
+    lt.hls_path
+FROM live_tuners lt
+JOIN devices d ON lt.device_id = d.device_id;
