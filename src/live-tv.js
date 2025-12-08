@@ -163,8 +163,13 @@ class TunerManager {
 
       const tuners = response.data;
       const total = tuners.length;
-      const inUse = tuners.filter(t => t.InUse === 1).length;
-      const available = tuners.filter(t => t.InUse === 0);
+
+      // A tuner is in use if it has a VctNumber field (or InUse: 1 on some devices)
+      // Idle tuners typically only have the Resource field
+      const isTunerInUse = (t) => t.InUse === 1 || t.VctNumber !== undefined;
+
+      const inUse = tuners.filter(isTunerInUse).length;
+      const available = tuners.filter(t => !isTunerInUse(t));
 
       return {
         available: available.length > 0,
@@ -173,7 +178,7 @@ class TunerManager {
         free: available.length,
         tuners: tuners.map(t => ({
           resource: t.Resource,
-          inUse: t.InUse === 1,
+          inUse: isTunerInUse(t),
           channel: t.VctNumber || null,
           targetIp: t.TargetIP || null
         }))
