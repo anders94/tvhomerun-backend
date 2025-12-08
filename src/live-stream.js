@@ -76,7 +76,7 @@ class LiveStreamManager {
       '-f', 'hls',
       '-hls_time', this.config.segmentDuration.toString(),
       '-hls_list_size', segmentsToKeep.toString(),
-      '-hls_flags', 'delete_segments+append_list', // Auto-delete old segments for live TV
+      '-hls_flags', 'delete_segments+append_list+omit_endlist', // Auto-delete old segments, no endlist for live TV
       '-hls_segment_filename', segmentPath,
       '-start_number', '0',                 // Start segment numbering at 0
       playlistPath
