@@ -50,6 +50,7 @@ class LiveStreamManager {
     const segmentsToKeep = Math.ceil((this.config.bufferMinutes * 60) / this.config.segmentDuration);
 
     // FFmpeg command for live TV transcoding
+    // Settings aligned with recorded show transcoding (hls-stream.js)
     const ffmpegArgs = [
       // Input options (before -i)
       '-fflags', '+discardcorrupt+genpts',  // Discard corrupt frames, generate PTS
@@ -57,17 +58,25 @@ class LiveStreamManager {
       '-analyzeduration', '3000000',        // Analyze for 3 seconds to detect streams
       '-probesize', '10000000',             // Probe 10MB to find stream info
       '-i', sourceUrl,
-      // Video: copy stream without re-encoding
-      '-c:v', 'copy',
+      // Video: transcode to H.264 for iOS/web compatibility
+      // Many broadcast channels use MPEG-2 which iOS doesn't support in HLS
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',                // Fast encoding
+      '-crf', '23',                         // Quality (lower = better, 23 is default)
+      '-maxrate', '5000k',                  // Max bitrate for AppleTV
+      '-bufsize', '10000k',                 // Buffer size
+      '-g', '48',                           // GOP size (keyframe interval)
+      '-sc_threshold', '0',                 // Disable scene change detection
       // Audio: transcode to AAC
       '-c:a', 'aac',
-      '-b:a', '128k',
-      '-ac', '2',                           // Downmix to stereo for compatibility
+      '-b:a', '128k',                       // Audio bitrate
+      '-ac', '2',                           // Stereo audio (downmix from 5.1)
+      '-ar', '48000',                       // Audio sample rate
       // HLS output format
       '-f', 'hls',
       '-hls_time', this.config.segmentDuration.toString(),
       '-hls_list_size', segmentsToKeep.toString(),
-      '-hls_flags', 'delete_segments+append_list',
+      '-hls_flags', 'delete_segments+append_list', // Auto-delete old segments for live TV
       '-hls_segment_filename', segmentPath,
       '-start_number', '0',                 // Start segment numbering at 0
       playlistPath

@@ -256,7 +256,7 @@ class HLSStreamManager {
       '-g', '48',                  // GOP size (keyframe interval)
       '-sc_threshold', '0',        // Disable scene change detection
       '-c:a', 'aac',               // Transcode audio to AAC
-      '-b:a', '192k',              // Audio bitrate
+      '-b:a', '128k',              // Audio bitrate
       '-ac', '2',                  // Stereo audio (downmix from 5.1)
       '-ar', '48000',              // Audio sample rate
       '-f', 'hls',                 // HLS format
