@@ -248,6 +248,44 @@ class LiveStreamManager {
   }
 
   /**
+   * Wait for first segment file to be created
+   * @param {string} tunerId - Tuner identifier
+   * @param {number} timeout - Timeout in milliseconds
+   * @returns {Promise<void>}
+   */
+  async waitForFirstSegment(tunerId, timeout = 20000) {
+    const streamInfo = this.activeStreams.get(tunerId);
+    if (!streamInfo) {
+      throw new Error(`No active stream for tuner ${tunerId}`);
+    }
+
+    const hlsPath = streamInfo.hlsPath;
+    const firstSegmentPath = path.join(hlsPath, 'segment-0.ts');
+    const startTime = Date.now();
+    const checkInterval = 500;
+
+    console.log(`[LiveStream] Waiting for first segment: ${firstSegmentPath}`);
+
+    while (Date.now() - startTime < timeout) {
+      try {
+        await fs.access(firstSegmentPath);
+        // File exists, check if it has reasonable content
+        const stats = await fs.stat(firstSegmentPath);
+        if (stats.size > 10000) { // At least 10KB to ensure it's a valid segment
+          console.log(`[LiveStream] First segment ready: ${firstSegmentPath} (${stats.size} bytes)`);
+          return;
+        }
+      } catch (err) {
+        // File doesn't exist yet, wait and retry
+      }
+
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+
+    throw new Error(`Timeout waiting for first segment at ${firstSegmentPath}`);
+  }
+
+  /**
    * Clean up HLS cache directory
    * @param {string} hlsPath - Path to HLS cache directory
    * @returns {Promise<void>}

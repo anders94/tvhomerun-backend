@@ -483,6 +483,16 @@ class TunerManager {
   }
 
   /**
+   * Wait for first segment to be ready
+   * @param {string} tunerId - Tuner identifier
+   * @param {number} timeout - Timeout in milliseconds
+   * @returns {Promise<void>}
+   */
+  async waitForFirstSegment(tunerId, timeout = 20000) {
+    return this.liveStreamManager.waitForFirstSegment(tunerId, timeout);
+  }
+
+  /**
    * Get tuner status
    */
   async getTunerStatus() {

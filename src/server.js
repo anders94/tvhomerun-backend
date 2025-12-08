@@ -857,6 +857,7 @@ class HDHomeRunServer {
             });
           }
 
+          this.log(`[LiveTV] Allocating tuner for channel ${channelNumber}, client ${clientId}`);
           const tunerId = await this.tunerManager.allocateTuner(channelNumber, clientId);
 
           if (!tunerId) {
@@ -866,12 +867,23 @@ class HDHomeRunServer {
             });
           }
 
+          // Wait for first segment to be ready before responding
+          this.log(`[LiveTV] Waiting for first segment to be ready for ${tunerId}`);
+          try {
+            await this.tunerManager.waitForFirstSegment(tunerId, 20000);
+            this.log(`[LiveTV] Stream ready for ${tunerId}`);
+          } catch (waitError) {
+            this.log(`[LiveTV] Timeout waiting for first segment: ${waitError.message}`);
+            // Stream started but first segment not ready yet - still return success
+            // Client can retry fetching the playlist
+          }
+
           res.json({
             success: true,
             tunerId,
             playlistUrl: `/api/live/${tunerId}/playlist.m3u8`,
             channelNumber,
-            message: 'Stream starting, playlist will be available shortly'
+            message: 'Stream ready'
           });
         } catch (error) {
           this.log(`Error starting live stream: ${error.message}`);
