@@ -57,6 +57,7 @@ class LiveStreamManager {
       '-err_detect', 'ignore_err',          // Ignore decoding errors during startup
       '-analyzeduration', '3000000',        // Analyze for 3 seconds to detect streams
       '-probesize', '10000000',             // Probe 10MB to find stream info
+      '-avoid_negative_ts', 'make_zero',    // Shift timestamps to start at zero
       '-i', sourceUrl,
       // Video: transcode to H.264 for iOS/web compatibility
       // Many broadcast channels use MPEG-2 which iOS doesn't support in HLS
@@ -76,9 +77,12 @@ class LiveStreamManager {
       '-f', 'hls',
       '-hls_time', this.config.segmentDuration.toString(),
       '-hls_list_size', '0',  // Keep ALL segments (like recorded shows)
-      '-hls_flags', 'append_list+omit_endlist', // No deleting segments, no endlist for live TV
+      '-hls_flags', 'append_list+omit_endlist+independent_segments', // Clean HLS for iOS
       '-hls_segment_filename', segmentPath,
+      '-hls_segment_type', 'mpegts',        // Use MPEG-TS segments (better compatibility)
       '-start_number', '0',                 // Start segment numbering at 0
+      '-muxdelay', '0',                     // No muxing delay
+      '-muxpreload', '0',                   // No mux preload
       playlistPath
     ];
 
