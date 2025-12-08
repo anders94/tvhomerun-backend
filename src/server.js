@@ -950,10 +950,13 @@ class HDHomeRunServer {
         res.sendFile(path.resolve(filePath), (err) => {
           if (err) {
             this.debug(`Error serving playlist for ${tunerId}: ${err.message}`);
-            res.status(404).json({
-              error: 'Playlist not found',
-              message: 'Stream may still be starting or has ended'
-            });
+            // Only send error response if headers haven't been sent yet
+            if (!res.headersSent) {
+              res.status(404).json({
+                error: 'Playlist not found',
+                message: 'Stream may still be starting or has ended'
+              });
+            }
           }
         });
       });
@@ -971,7 +974,10 @@ class HDHomeRunServer {
         res.sendFile(path.resolve(filePath), (err) => {
           if (err) {
             this.debug(`Error serving segment ${segment} for ${tunerId}: ${err.message}`);
-            res.status(404).json({ error: 'Segment not found' });
+            // Only send error response if headers haven't been sent yet
+            if (!res.headersSent) {
+              res.status(404).json({ error: 'Segment not found' });
+            }
           }
         });
       });
