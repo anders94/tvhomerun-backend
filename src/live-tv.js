@@ -11,6 +11,7 @@
  */
 
 const db = require('asynqlite');
+const axios = require('axios');
 const LiveStreamManager = require('./live-stream');
 
 class TunerManager {
@@ -146,6 +147,44 @@ class TunerManager {
   }
 
   /**
+   * Check HDHomeRun device tuner availability
+   * @param {string} deviceIp - Device IP address
+   * @returns {Promise<object>} Tuner availability info
+   */
+  async checkDeviceTuners(deviceIp) {
+    try {
+      const response = await axios.get(`http://${deviceIp}/status.json`, {
+        timeout: 5000
+      });
+
+      if (!Array.isArray(response.data)) {
+        return { available: false, total: 0, inUse: 0, error: 'Invalid response format' };
+      }
+
+      const tuners = response.data;
+      const total = tuners.length;
+      const inUse = tuners.filter(t => t.InUse === 1).length;
+      const available = tuners.filter(t => t.InUse === 0);
+
+      return {
+        available: available.length > 0,
+        total,
+        inUse,
+        free: available.length,
+        tuners: tuners.map(t => ({
+          resource: t.Resource,
+          inUse: t.InUse === 1,
+          channel: t.VctNumber || null,
+          targetIp: t.TargetIP || null
+        }))
+      };
+    } catch (error) {
+      console.error(`[LiveTV] Failed to check tuner status on ${deviceIp}:`, error.message);
+      return { available: false, total: 0, inUse: 0, error: error.message };
+    }
+  }
+
+  /**
    * Allocate tuner for a channel
    * Returns tunerId or null if no tuners available
    */
@@ -163,9 +202,27 @@ class TunerManager {
       }
     }
 
-    // 2. Find idle tuner
+    // 2. Find idle tuner and verify device has capacity
     for (const [tunerId, tuner] of this.tuners.entries()) {
       if (tuner.state === 'idle' && tuner.deviceIp) {
+        // Check if device actually has available tuners before starting
+        console.log(`[LiveTV] Checking tuner availability on device ${tuner.deviceIp}`);
+        const deviceStatus = await this.checkDeviceTuners(tuner.deviceIp);
+
+        if (!deviceStatus.available) {
+          console.log(`[LiveTV] Device ${tuner.deviceIp} has no available tuners (${deviceStatus.inUse}/${deviceStatus.total} in use)`);
+          if (deviceStatus.tuners && deviceStatus.tuners.length > 0) {
+            // Log what's using the tuners
+            deviceStatus.tuners.forEach(t => {
+              if (t.inUse) {
+                console.log(`[LiveTV]   ${t.resource}: in use by ${t.targetIp || 'unknown'}, channel ${t.channel || 'unknown'}`);
+              }
+            });
+          }
+          continue; // Try next device
+        }
+
+        console.log(`[LiveTV] Device ${tuner.deviceIp} has ${deviceStatus.free} available tuner(s)`);
         console.log(`[LiveTV] Allocating idle tuner ${tunerId}`);
         await this.startStream(tunerId, channelNumber);
         await this.registerViewer(tunerId, clientId, channelNumber);
@@ -173,9 +230,18 @@ class TunerManager {
       }
     }
 
-    // 3. Find cooldown tuner with no viewers
+    // 3. Find cooldown tuner with no viewers and verify device has capacity
     for (const [tunerId, tuner] of this.tuners.entries()) {
       if (tuner.state === 'cooldown' && tuner.viewerCount === 0 && tuner.deviceIp) {
+        // Check if device actually has available tuners before starting
+        console.log(`[LiveTV] Checking tuner availability on device ${tuner.deviceIp} for cooldown tuner`);
+        const deviceStatus = await this.checkDeviceTuners(tuner.deviceIp);
+
+        if (!deviceStatus.available) {
+          console.log(`[LiveTV] Device ${tuner.deviceIp} has no available tuners (${deviceStatus.inUse}/${deviceStatus.total} in use)`);
+          continue; // Try next device
+        }
+
         console.log(`[LiveTV] Reallocating cooldown tuner ${tunerId}`);
         await this.startStream(tunerId, channelNumber);
         await this.registerViewer(tunerId, clientId, channelNumber);
@@ -198,8 +264,53 @@ class TunerManager {
 
     console.log(`[LiveTV] Starting stream on ${tunerId} for channel ${channelNumber}`);
 
-    // Build HDHomeRun stream URL
-    const sourceUrl = `http://${tuner.deviceIp}:5004/tuner${tuner.tunerIndex}/v${channelNumber}`;
+    // Build HDHomeRun stream URL using /auto/ to let device pick best available tuner
+    // This handles cases where specific tuners may not support certain channels (e.g., HEVC)
+    const sourceUrl = `http://${tuner.deviceIp}:5004/auto/v${channelNumber}`;
+
+    // Pre-check: Verify stream URL is accessible before starting FFmpeg
+    try {
+      console.log(`[LiveTV] Pre-checking stream URL: ${sourceUrl}`);
+      const checkResponse = await axios.get(sourceUrl, {
+        timeout: 3000,
+        maxContentLength: 1024, // Only read first 1KB to test connectivity
+        validateStatus: () => true, // Don't throw on non-2xx status
+        responseType: 'stream'
+      });
+
+      // Immediately close the stream
+      if (checkResponse.data && checkResponse.data.destroy) {
+        checkResponse.data.destroy();
+      }
+
+      if (checkResponse.status === 503) {
+        const errorCode = checkResponse.headers['x-hdhomerun-error'];
+        let errorMsg = 'HDHomeRun device returned 503 Service Unavailable';
+
+        if (errorCode === '805') {
+          errorMsg = 'All tuners are in use (error 805). No tuners available on device.';
+        } else if (errorCode === '804') {
+          errorMsg = 'Requested tuner is in use (error 804)';
+        } else if (errorCode === '811') {
+          errorMsg = 'Content protection required (error 811). Channel may be DRM-protected.';
+        } else if (errorCode) {
+          errorMsg = `HDHomeRun error ${errorCode}`;
+        }
+
+        throw new Error(errorMsg);
+      }
+
+      if (checkResponse.status >= 400) {
+        throw new Error(`Stream URL returned HTTP ${checkResponse.status}`);
+      }
+
+      console.log(`[LiveTV] Stream URL check passed`);
+    } catch (error) {
+      if (error.code === 'ECONNABORTED') {
+        throw new Error(`Connection timeout to HDHomeRun device at ${tuner.deviceIp}`);
+      }
+      throw error;
+    }
 
     try {
       // Start FFmpeg transcoding
