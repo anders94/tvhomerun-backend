@@ -871,6 +871,9 @@ class HDHomeRunServer {
           this.log(`[LiveTV] Waiting for first segment to be ready for ${tunerId}`);
           try {
             await this.tunerManager.waitForFirstSegment(tunerId, 20000);
+            this.log(`[LiveTV] First segment detected, buffering for 2 more seconds...`);
+            // Add 2-second delay to allow more stream buffering
+            await new Promise(resolve => setTimeout(resolve, 2000));
             this.log(`[LiveTV] Stream ready for ${tunerId}`);
           } catch (waitError) {
             this.log(`[LiveTV] Timeout waiting for first segment: ${waitError.message}`);
