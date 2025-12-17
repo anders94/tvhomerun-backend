@@ -14,8 +14,9 @@ const db = require('asynqlite');
 
 class GuideManager {
   constructor() {
-    this.CACHE_DURATION = 15 * 60 * 1000; // 15 minutes in milliseconds
+    this.CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
     this.DEFAULT_DURATION_HOURS = 24; // Default guide window
+    this.refreshTimer = null;
   }
 
   /**
@@ -144,7 +145,7 @@ class GuideManager {
    * Refresh guide data from cloud and cache it
    */
   async refreshGuideCache(options = {}) {
-    console.log('Refreshing guide data from cloud API...');
+    console.log('[Guide] Refreshing guide data from cloud API...');
 
     const guideData = await this.fetchGuideFromCloud(options);
 
@@ -159,7 +160,7 @@ class GuideManager {
       }
     }
 
-    console.log(`Cached guide data for ${guideData.length} channels`);
+    console.log(`[Guide] Cached guide data for ${guideData.length} channels`);
   }
 
   /**
@@ -321,6 +322,69 @@ class GuideManager {
     `, [seriesId]);
 
     return results && results.length > 0 ? results[0] : null;
+  }
+
+  /**
+   * Initialize guide manager - load guide data on startup
+   */
+  async initialize() {
+    console.log('[Guide] Initializing guide manager...');
+
+    try {
+      // Check if we have fresh data
+      const isFresh = await this.isGuideFresh();
+
+      if (!isFresh) {
+        console.log('[Guide] No fresh guide data found, loading from cloud...');
+        await this.refreshGuideCache();
+      } else {
+        console.log('[Guide] Guide data is fresh, skipping initial load');
+      }
+
+      // Start periodic refresh (every 12 hours)
+      this.startPeriodicRefresh();
+
+      console.log('[Guide] Guide manager initialized');
+    } catch (error) {
+      console.error('[Guide] Failed to initialize guide manager:', error.message);
+      // Don't throw - let the server start even if guide fails
+      // Will retry on next periodic refresh
+    }
+  }
+
+  /**
+   * Start periodic background refresh
+   */
+  startPeriodicRefresh() {
+    // Clear any existing timer
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+    }
+
+    // Refresh every 12 hours
+    const refreshInterval = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+
+    this.refreshTimer = setInterval(async () => {
+      try {
+        console.log('[Guide] Running periodic guide refresh...');
+        await this.refreshGuideCache();
+      } catch (error) {
+        console.error('[Guide] Periodic refresh failed:', error.message);
+      }
+    }, refreshInterval);
+
+    console.log('[Guide] Periodic refresh scheduled (every 12 hours)');
+  }
+
+  /**
+   * Stop periodic refresh (for cleanup)
+   */
+  stopPeriodicRefresh() {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+      console.log('[Guide] Periodic refresh stopped');
+    }
   }
 }
 

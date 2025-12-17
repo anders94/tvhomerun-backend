@@ -1357,6 +1357,10 @@ class HDHomeRunServer {
         await this.tunerManager.initialize();
       }
 
+      // Initialize Guide manager (loads guide data and starts periodic refresh)
+      this.log('Initializing Guide manager...');
+      await GuideManager.initialize();
+
       // Setup scheduled discovery
       this.setupScheduler();
 
@@ -1412,6 +1416,15 @@ class HDHomeRunServer {
 
   async stop() {
     this.log('Shutting down server...');
+
+    // Stop guide periodic refresh
+    GuideManager.stopPeriodicRefresh();
+
+    // Stop live TV if enabled
+    if (this.liveTVEnabled && this.tunerManager) {
+      await this.tunerManager.shutdown();
+    }
+
     await this.hlsManager.shutdown();
     await this.database.close();
   }
