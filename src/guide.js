@@ -14,7 +14,7 @@ const db = require('asynqlite');
 
 class GuideManager {
   constructor() {
-    this.CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+    this.CACHE_DURATION = 15 * 60 * 1000; // 12 hours in milliseconds
     this.DEFAULT_DURATION_HOURS = 24; // Default guide window
     this.refreshTimer = null;
   }
