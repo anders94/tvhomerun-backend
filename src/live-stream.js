@@ -46,11 +46,12 @@ class LiveStreamManager {
     const playlistPath = path.join(hlsPath, 'playlist.m3u8');
     const segmentPath = path.join(hlsPath, 'segment-%d.ts');
 
-    // Calculate HLS list size (number of segments to keep)
-    const segmentsToKeep = Math.ceil((this.config.bufferMinutes * 60) / this.config.segmentDuration);
+    // Calculate HLS list size for live streaming (rolling window)
+    // Keep last 10 segments (~60 seconds at 6s per segment) for live playback
+    const segmentsToKeep = 10;
 
     // FFmpeg command for live TV transcoding
-    // Settings aligned with recorded show transcoding (hls-stream.js)
+    // Standard live HLS configuration
     const ffmpegArgs = [
       // Input options (before -i)
       '-fflags', '+discardcorrupt+genpts',  // Discard corrupt frames, generate PTS
@@ -73,16 +74,13 @@ class LiveStreamManager {
       '-b:a', '128k',                       // Audio bitrate
       '-ac', '2',                           // Stereo audio (downmix from 5.1)
       '-ar', '48000',                       // Audio sample rate
-      // HLS output format
+      // HLS output format - Live streaming mode
       '-f', 'hls',
       '-hls_time', this.config.segmentDuration.toString(),
-      '-hls_list_size', '0',  // Keep ALL segments (like recorded shows)
-      '-hls_flags', 'append_list+omit_endlist+independent_segments', // Clean HLS for iOS
+      '-hls_list_size', segmentsToKeep.toString(),  // Sliding window of segments
+      '-hls_flags', 'delete_segments+omit_endlist', // Delete old segments, mark as live
       '-hls_segment_filename', segmentPath,
       '-hls_segment_type', 'mpegts',        // Use MPEG-TS segments (better compatibility)
-      '-start_number', '0',                 // Start segment numbering at 0
-      '-muxdelay', '0',                     // No muxing delay
-      '-muxpreload', '0',                   // No mux preload
       playlistPath
     ];
 
