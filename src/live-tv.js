@@ -196,7 +196,7 @@ class TunerManager {
   async allocateTuner(channelNumber, clientId) {
     console.log(`[LiveTV] Allocating tuner for channel ${channelNumber}, client ${clientId}`);
 
-    // 1. Check if channel already streaming on any tuner (reuse)
+    // 1. Check if channel already streaming on active tuner (reuse with viewers)
     for (const [tunerId, tuner] of this.tuners.entries()) {
       if (tuner.state === 'active' &&
           tuner.channelNumber === channelNumber &&
@@ -207,7 +207,25 @@ class TunerManager {
       }
     }
 
-    // 2. Find idle tuner and verify device has capacity
+    // 2. Check if channel already streaming on cooldown tuner (reuse existing stream!)
+    for (const [tunerId, tuner] of this.tuners.entries()) {
+      if (tuner.state === 'cooldown' &&
+          tuner.channelNumber === channelNumber &&
+          tuner.viewerCount === 0) {
+        console.log(`[LiveTV] Reusing cooldown tuner ${tunerId} already streaming channel ${channelNumber}`);
+        // Move back to active state and register viewer
+        tuner.state = 'active';
+        await db.run(`
+          UPDATE live_tuners
+          SET state = 'active'
+          WHERE id = ?
+        `, [tunerId]);
+        await this.registerViewer(tunerId, clientId, channelNumber);
+        return tunerId;
+      }
+    }
+
+    // 3. Find idle tuner and verify device has capacity
     for (const [tunerId, tuner] of this.tuners.entries()) {
       if (tuner.state === 'idle' && tuner.deviceIp) {
         // Check if device actually has available tuners before starting
@@ -235,7 +253,7 @@ class TunerManager {
       }
     }
 
-    // 3. Find cooldown tuner with no viewers and verify device has capacity
+    // 4. Find cooldown tuner streaming different channel (last resort - stop and restart)
     for (const [tunerId, tuner] of this.tuners.entries()) {
       if (tuner.state === 'cooldown' && tuner.viewerCount === 0 && tuner.deviceIp) {
         // Check if device actually has available tuners before starting
@@ -247,7 +265,7 @@ class TunerManager {
           continue; // Try next device
         }
 
-        console.log(`[LiveTV] Reallocating cooldown tuner ${tunerId}`);
+        console.log(`[LiveTV] Reallocating cooldown tuner ${tunerId} (was on channel ${tuner.channelNumber})`);
         await this.startStream(tunerId, channelNumber);
         await this.registerViewer(tunerId, clientId, channelNumber);
         return tunerId;
