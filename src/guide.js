@@ -31,6 +31,74 @@ class GuideManager {
   }
 
   /**
+   * Refresh device_auth token by fetching fresh data from device
+   */
+  async refreshDeviceAuth() {
+    console.log('Refreshing device_auth token from device...');
+
+    // Get device IP address
+    const devices = await db.run('SELECT device_id, ip_address FROM devices WHERE ip_address IS NOT NULL LIMIT 1');
+    if (!devices || devices.length === 0) {
+      throw new Error('No devices found with IP address');
+    }
+
+    const device = devices[0];
+
+    try {
+      // Fetch fresh device info from the device
+      const response = await axios.get(`http://${device.ip_address}/discover.json`, {
+        timeout: 5000
+      });
+
+      const newDeviceAuth = response.data.DeviceAuth;
+      if (!newDeviceAuth) {
+        throw new Error('Device did not return DeviceAuth token');
+      }
+
+      // Update database
+      await db.run(
+        'UPDATE devices SET device_auth = ?, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?',
+        [newDeviceAuth, device.device_id]
+      );
+
+      console.log(`Device_auth refreshed successfully for device ${device.device_id}`);
+      return newDeviceAuth;
+    } catch (error) {
+      console.error(`Failed to refresh device_auth: ${error.message}`);
+      throw new Error(`Unable to refresh device authentication: ${error.message}`);
+    }
+  }
+
+  /**
+   * Wrapper for cloud API calls with automatic 403 retry
+   * If a 403 error occurs, refreshes device_auth and retries once
+   */
+  async callCloudApiWithRetry(apiCallFn) {
+    try {
+      return await apiCallFn();
+    } catch (error) {
+      // Check if it's a 403 error from the cloud API
+      if (error.response && error.response.status === 403) {
+        console.log('Received 403 from cloud API, attempting to refresh device_auth and retry...');
+
+        try {
+          // Refresh the device_auth token
+          await this.refreshDeviceAuth();
+
+          // Retry the API call once with the new token
+          return await apiCallFn();
+        } catch (retryError) {
+          console.error('Retry after device_auth refresh failed:', retryError.message);
+          throw retryError;
+        }
+      }
+
+      // For non-403 errors, just throw them
+      throw error;
+    }
+  }
+
+  /**
    * Check if cached guide data is fresh
    */
   async isGuideFresh() {
@@ -60,23 +128,25 @@ class GuideManager {
       channel = null
     } = options;
 
-    const deviceAuth = await this.getDeviceAuth();
-    const params = {
-      DeviceAuth: deviceAuth,
-      Start: start,
-      Duration: duration
-    };
+    return await this.callCloudApiWithRetry(async () => {
+      const deviceAuth = await this.getDeviceAuth();
+      const params = {
+        DeviceAuth: deviceAuth,
+        Start: start,
+        Duration: duration
+      };
 
-    if (channel) {
-      params.Channel = channel;
-    }
+      if (channel) {
+        params.Channel = channel;
+      }
 
-    const response = await axios.get('https://api.hdhomerun.com/api/guide', {
-      params,
-      timeout: 10000
+      const response = await axios.get('https://api.hdhomerun.com/api/guide', {
+        params,
+        timeout: 10000
+      });
+
+      return response.data;
     });
-
-    return response.data;
   }
 
   /**
