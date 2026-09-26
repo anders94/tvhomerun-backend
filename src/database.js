@@ -473,11 +473,17 @@ class HDHomeRunDatabase {
     return { season: null, episode: null };
   }
 
-  async syncDeviceData(deviceData, shows) {
+  async syncDeviceData(deviceData, shows, { prune = false } = {}) {
     console.log(`Syncing data for device: ${deviceData.FriendlyName}`);
     
     // Upsert device
     const deviceDbId = await this.upsertDevice(deviceData);
+
+    // Track which series/episodes the device currently has so recordings
+    // deleted outside this server can be pruned from the database
+    const seenSeriesIds = new Set();
+    const seenEpisodeIds = new Set();
+    const incompleteSeriesIds = new Set();
     
     // Sync all series and episodes
     for (const show of shows) {
@@ -490,10 +496,14 @@ class HDHomeRunDatabase {
         StartTime: show.startTime,
         UpdateID: show.updateID
       });
+      seenSeriesIds.add(seriesDbId);
+      if (show.episodesComplete === false) {
+        incompleteSeriesIds.add(seriesDbId);
+      }
       
       // Sync episodes for this series
       for (const episode of show.episodes) {
-        await this.upsertEpisode(seriesDbId, {
+        const episodeDbId = await this.upsertEpisode(seriesDbId, {
           ProgramID: episode.programID,
           Title: episode.title,
           EpisodeTitle: episode.title, // Using episode title as both title fields
@@ -516,10 +526,54 @@ class HDHomeRunDatabase {
           RecordSuccess: episode.recordSuccess,
           ImageURL: episode.imageURL
         });
+        seenEpisodeIds.add(episodeDbId);
       }
+    }
+
+    let prunedEpisodeIds = [];
+    if (prune) {
+      prunedEpisodeIds = await this.pruneMissingContent(
+        deviceDbId, seenSeriesIds, seenEpisodeIds, incompleteSeriesIds
+      );
     }
     
     console.log(`Sync completed for device: ${deviceData.FriendlyName}`);
+    return { prunedEpisodeIds };
+  }
+
+  async pruneMissingContent(deviceDbId, seenSeriesIds, seenEpisodeIds, incompleteSeriesIds) {
+    // Remove episodes (and then empty series) that are no longer on the device.
+    // Series whose episode list could not be fetched are left untouched.
+    const rows = await db.run(`
+      SELECT e.id, e.series_id, s.title as series_title, e.episode_title
+      FROM episodes e
+      JOIN series s ON e.series_id = s.id
+      WHERE s.device_id = ?
+    `, [deviceDbId]);
+
+    const stale = rows.filter(row =>
+      !incompleteSeriesIds.has(row.series_id) && !seenEpisodeIds.has(row.id)
+    );
+
+    for (const row of stale) {
+      await db.run('DELETE FROM episodes WHERE id = ?', [row.id]);
+      console.log(`Pruned episode ${row.id} no longer on device: ${row.series_title} - ${row.episode_title}`);
+    }
+
+    const series = await db.run('SELECT id, title FROM series WHERE device_id = ?', [deviceDbId]);
+    for (const s of series) {
+      if (seenSeriesIds.has(s.id)) continue;
+      const remaining = await db.run('SELECT COUNT(*) as count FROM episodes WHERE series_id = ?', [s.id]);
+      if (remaining[0].count === 0) {
+        await db.run('DELETE FROM series WHERE id = ?', [s.id]);
+        console.log(`Pruned series ${s.id} no longer on device: ${s.title}`);
+      }
+    }
+
+    if (stale.length > 0) {
+      console.log(`Pruned ${stale.length} episode(s) no longer on device`);
+    }
+    return stale.map(row => row.id);
   }
 
   async getDeviceStats() {

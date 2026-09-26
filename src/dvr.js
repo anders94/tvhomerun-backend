@@ -4,9 +4,13 @@ class HDHomeRunDVR {
   constructor(device) {
     this.device = device;
     this.baseUrl = `http://${device.ip}`;
+    // Set when the last getRecordedShows() call could not read the series list,
+    // so callers can tell "no recordings" apart from "fetch failed"
+    this.recordedShowsError = null;
   }
 
   async getRecordedShows() {
+    this.recordedShowsError = null;
     try {
       // First get the series list
       const response = await axios.get(`${this.baseUrl}/recorded_files.json`, {
@@ -14,6 +18,7 @@ class HDHomeRunDVR {
       });
       
       if (!response.data || !Array.isArray(response.data)) {
+        this.recordedShowsError = new Error('Unexpected recorded_files.json response');
         return [];
       }
 
@@ -61,8 +66,11 @@ class HDHomeRunDVR {
               episodesURL: series.EpisodesURL,
               startTime: series.StartTime,
               updateID: series.UpdateID,
-              episodes: episodes
+              episodes: episodes,
+              episodesComplete: true
             });
+          } else {
+            throw new Error('Unexpected episodes response');
           }
         } catch (episodeError) {
           console.error(`Failed to get episodes for ${series.Title}:`, episodeError.message);
@@ -75,7 +83,8 @@ class HDHomeRunDVR {
             episodesURL: series.EpisodesURL,
             startTime: series.StartTime,
             updateID: series.UpdateID,
-            episodes: []
+            episodes: [],
+            episodesComplete: false
           });
         }
       }
@@ -83,6 +92,7 @@ class HDHomeRunDVR {
       return shows;
     } catch (error) {
       console.error(`Failed to get recorded shows from ${this.device.ip}:`, error.message);
+      this.recordedShowsError = error;
       return [];
     }
   }

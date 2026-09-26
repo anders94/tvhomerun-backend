@@ -169,6 +169,25 @@ class HDHomeRunServer {
     }
   }
 
+  async isRecordingOnDevice(episode) {
+    // Check whether the device still lists this recording. Errs on the side of
+    // "still there" if the device can't be queried.
+    try {
+      const { origin } = new URL(episode.cmd_url);
+      const response = await axios.get(`${origin}/recorded_files.json`, {
+        params: { SeriesID: episode.series_series_id },
+        timeout: 5000
+      });
+      if (!Array.isArray(response.data)) {
+        return true;
+      }
+      return response.data.some(recording => recording.CmdURL === episode.cmd_url);
+    } catch (error) {
+      this.log(`Could not verify recording on device: ${error.message}`);
+      return true;
+    }
+  }
+
   setupMiddleware() {
     this.app.use(cors());
     this.app.use(express.json());
@@ -466,7 +485,7 @@ class HDHomeRunServer {
     this.app.delete('/api/episodes/:id', async (req, res) => {
       try {
         const { id } = req.params;
-        const { rerecord = false } = req.query;
+        const rerecord = req.query.rerecord === 'true';
 
         // Get episode to check if it exists and get cmd_url
         const episode = await this.database.getEpisodeById(id);
@@ -483,12 +502,17 @@ class HDHomeRunServer {
             deviceDeletionResult = await this.deleteRecordingFromHDHomeRun(episode.cmd_url, rerecord);
             this.log(`✓ Episode deleted from HDHomeRun device`);
           } catch (error) {
-            this.log(`✗ Failed to delete from device: ${error.message}`);
-            return res.status(500).json({
-              error: 'Failed to delete recording from HDHomeRun device',
-              details: error.message,
-              deviceDeletion: { success: false, error: error.message }
-            });
+            if (await this.isRecordingOnDevice(episode)) {
+              this.log(`✗ Failed to delete from device: ${error.message}`);
+              return res.status(500).json({
+                error: 'Failed to delete recording from HDHomeRun device',
+                details: error.message,
+                deviceDeletion: { success: false, error: error.message }
+              });
+            }
+            // Already deleted on the device (e.g. from another client) - clean up locally
+            this.log(`⚠️  Recording no longer on device, removing local copy only`);
+            deviceDeletionResult = { success: true, alreadyDeleted: true };
           }
         } else {
           this.log(`⚠️  Episode has no cmd_url, skipping device deletion`);
@@ -1253,8 +1277,19 @@ class HDHomeRunServer {
         const shows = await dvr.getRecordedShows();
         this.log(`Found ${shows.length} series on ${device.FriendlyName}`);
         
-        // Sync to database
-        await this.database.syncDeviceData(device, shows);
+        // Sync to database, pruning recordings deleted outside this server
+        // (only when the device's series list was read successfully)
+        const { prunedEpisodeIds } = await this.database.syncDeviceData(device, shows, {
+          prune: !dvr.recordedShowsError
+        });
+
+        for (const episodeId of prunedEpisodeIds) {
+          try {
+            await this.hlsManager.deleteTranscode(String(episodeId));
+          } catch (error) {
+            this.log(`Failed to remove HLS cache for pruned episode ${episodeId}: ${error.message}`);
+          }
+        }
       }
 
       this.lastDiscovery = new Date().toISOString();
