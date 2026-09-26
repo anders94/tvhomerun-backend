@@ -103,6 +103,10 @@ npm run scan           # Run original CLI discovery tool
 - `PUT /api/episodes/:id/progress` - Update episode playback progress
 - `DELETE /api/episodes/:id` - Delete episode from device, cache, and database
 
+### HLS Cache Maintenance
+- `GET /api/cache` - Report of cache dirs: only-copy (recording gone from device), re-creatable (still on device), orphaned (no database row), and recordings lost with no copy
+- `DELETE /api/cache/:episodeId` - Remove a re-creatable or orphaned cache dir (refuses an only-copy; use the episode delete for that)
+
 ### HLS Streaming
 - `GET /api/stream/:episodeId/playlist.m3u8` - Get HLS playlist for episode (initiates transcode if needed)
 - `GET /api/stream/:episodeId/:filename` - Serve HLS segment files
@@ -111,19 +115,32 @@ npm run scan           # Run original CLI discovery tool
 ### Discovery
 - `POST /api/discover` - Manual discovery trigger (returns immediately, runs in background)
 
+## Recording Lifecycle Rules
+
+These rules exist because the HDHomeRun's drive can fail (it has) and the local HLS cache may then be the only copy of a recording.
+
+**Nothing local is deleted automatically because it vanished from the device.** Discovery flags such episodes with `device_missing_since` (kept on the row, exposed as `on_device: false` in the API) and leaves the row and any HLS cache alone. The flag clears if the recording reappears. Series rows are only removed when they have no episodes left. Flagging is skipped when the device's series list couldn't be read, so a network blip never flags everything.
+
+**Every local delete is mirrored on the device.** `DELETE /api/episodes/:id` deletes on the device first and only removes the cache and row after the device confirms (success, or the device says the recording is already gone). If the device can't be reached, the request fails; `?force=true` removes the local copy anyway.
+
+**Cache aging only touches re-creatable content.** Complete caches of recordings still on the device are removed after `HLS_CACHE_MAX_AGE_DAYS` (default 30, 0 disables) without being played. Caches of missing recordings are never aged out; cache dirs with no database row (orphans) are reported, never removed automatically.
+
+**Nothing is invisible.** `GET /api/cache` lists only-copy, re-creatable and orphaned cache dirs with sizes, plus recordings that are gone with no copy at all. Discovery logs the same summary.
+
 ## Deletion Workflow
 
 When deleting an episode via `DELETE /api/episodes/:id?rerecord=0`:
 
-1. **HDHomeRun Device Deletion** - Recording is deleted from the device using the undocumented `cmd=delete` API
-2. **HLS Cache Cleanup** - The transcoded HLS files and directory are removed from `hls-cache/{episodeId}/`
-3. **Database Removal** - Episode is deleted from the local SQLite database (triggers update series statistics)
+1. **HDHomeRun Device Deletion** - Recording is deleted from the device using the undocumented `cmd=delete` API. If the episode is flagged missing, the device is re-checked first; if it's confirmed gone the device step is skipped.
+2. **HLS Cache Cleanup** - The transcoded HLS files and directory are removed from `hls-cache/{episodeId}/` via the HLS manager (kills any running transcode)
+3. **Database Removal** - Episode is deleted from the local SQLite database (triggers update series statistics); the series row is removed if it was the last episode
 
 Query Parameters:
 - `rerecord=false` (default): Prevents the program from being recorded again
 - `rerecord=true`: Allows the same program to be recorded in future airings
+- `force=true`: Remove the local copy even if the device deletion fails (device unreachable)
 
-The deletion fails fast - if the device deletion fails, the HLS cache and database are not modified.
+The deletion fails fast - if the device still has the recording and the deletion fails, the HLS cache and database are not modified.
 
 ## Data Flow
 
@@ -137,7 +154,7 @@ The deletion fails fast - if the device deletion fails, the HLS cache and databa
 1. **Discovery Phase**: UDP broadcast → HTTP fallback → network scanning → device validation
 2. **Storage Detection**: Check multiple endpoints to identify DVR-capable devices
 3. **Content Retrieval**: Series list → individual episode details → metadata parsing
-4. **Database Sync**: Upsert devices/series/episodes with conflict resolution
+4. **Database Sync**: Upsert devices/series/episodes with conflict resolution; flag episodes the device no longer lists (see Recording Lifecycle Rules)
 5. **Bulk HLS Conversion** (if `--pre-cache` enabled): Queue all episodes → transcode with concurrency limit → log progress
 
 ### HLS Transcoding Flow

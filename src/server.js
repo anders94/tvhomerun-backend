@@ -21,7 +21,12 @@ class HDHomeRunServer {
     this.verbose = options.verbose || false;
     this.preCache = options.preCache || false;
     this.database = new HDHomeRunDatabase();
-    this.hlsManager = new HLSStreamManager({ verbose: this.verbose });
+    this.hlsManager = new HLSStreamManager({ verbose: this.verbose, cacheDir: process.env.HLS_CACHE_DIR });
+    // Completed caches of recordings still on the device are re-creatable and are
+    // dropped after this many days without being played (0 = keep forever).
+    // Caches of recordings that are gone from the device are never aged out.
+    const maxAgeDays = parseInt(process.env.HLS_CACHE_MAX_AGE_DAYS ?? '30', 10);
+    this.hlsCacheMaxAgeMs = Number.isNaN(maxAgeDays) ? 30 * 86400000 : maxAgeDays * 86400000;
     this.isDiscovering = false;
     this.lastDiscovery = null;
     this.isBulkCaching = false;
@@ -94,13 +99,46 @@ class HDHomeRunServer {
     // Calculate HLS cache size from filesystem
     const hlsCacheDir = path.join(this.hlsManager.cacheDir, String(episode.id));
     const hlsCacheSize = this.getDirectorySize(hlsCacheDir);
+    const cacheState = this.hlsManager.getTranscodeStatus(episode.id).state;
+    const onDevice = !episode.device_missing_since;
+    const hasLocalCopy = cacheState === 'complete';
 
     return {
       ...episode,
       hls_cache_bytes: hlsCacheSize,
+      hls_cache_state: hasLocalCopy || cacheState === 'transcoding' || cacheState === 'error' ? cacheState : null,
+      on_device: onDevice,                  // Device still lists this recording
+      local_copy: hasLocalCopy,             // Complete transcode is cached locally
+      playable: onDevice || hasLocalCopy,   // False means the recording is gone everywhere
       source_url: episode.play_url,  // Keep original HDHomeRun URL
       play_url: hlsUrl                // Replace with HLS proxy URL
     };
+  }
+
+  async verifyOnDevice(episode) {
+    // Ask the device whether a recording flagged as missing has come back
+    // (e.g. a drive was remounted). Clears the flag if so. Returns true only on a
+    // confirmed "present"; errors are treated as still missing here because the
+    // caller already has a flag saying so.
+    if (!episode.cmd_url) return false;
+    try {
+      const { origin } = new URL(episode.cmd_url);
+      const response = await axios.get(`${origin}/recorded_files.json`, {
+        params: { SeriesID: episode.series_series_id },
+        timeout: 5000
+      });
+      const recordingId = HDHomeRunDVR.recordingIdFromUrl(episode.cmd_url);
+      const present = Array.isArray(response.data) &&
+        response.data.some(recording => HDHomeRunDVR.recordingIdFromUrl(recording.CmdURL) === recordingId);
+      if (present) {
+        this.log(`Episode ${episode.id} is back on the device, clearing missing flag`);
+        await this.database.clearEpisodeMissing(episode.id);
+      }
+      return present;
+    } catch (error) {
+      this.debug(`Could not re-check episode ${episode.id} on device: ${error.message}`);
+      return false;
+    }
   }
 
   async relayProgressToHDHomeRun(cmdUrl, position, watched) {
@@ -181,7 +219,8 @@ class HDHomeRunServer {
       if (!Array.isArray(response.data)) {
         return true;
       }
-      return response.data.some(recording => recording.CmdURL === episode.cmd_url);
+      const recordingId = HDHomeRunDVR.recordingIdFromUrl(episode.cmd_url);
+      return response.data.some(recording => HDHomeRunDVR.recordingIdFromUrl(recording.CmdURL) === recordingId);
     } catch (error) {
       this.log(`Could not verify recording on device: ${error.message}`);
       return true;
@@ -448,7 +487,10 @@ class HDHomeRunServer {
         // Attempt to relay progress to HDHomeRun
         // Note: This uses undocumented APIs and may not work on all devices/firmware versions
         let deviceSyncResult = null;
-        if (episode.cmd_url) {
+        if (episode.device_missing_since) {
+          this.debug(`Episode ${id} is not on the device, skipping device sync`);
+          deviceSyncResult = { success: false, error: 'Recording is not on the device' };
+        } else if (episode.cmd_url) {
           deviceSyncResult = await this.relayProgressToHDHomeRun(episode.cmd_url, position, watched);
         } else {
           this.debug('Episode has no cmd_url, skipping device sync');
@@ -486,6 +528,7 @@ class HDHomeRunServer {
       try {
         const { id } = req.params;
         const rerecord = req.query.rerecord === 'true';
+        const force = req.query.force === 'true';
 
         // Get episode to check if it exists and get cmd_url
         const episode = await this.database.getEpisodeById(id);
@@ -495,45 +538,65 @@ class HDHomeRunServer {
 
         this.log(`Deleting episode ${id}: ${episode.series_title} - ${episode.episode_title}`);
 
-        // Step 1: Delete from HDHomeRun device
-        let deviceDeletionResult = null;
+        // Step 1: Delete from HDHomeRun device. A local delete must always be
+        // mirrored on the device, so this only proceeds past a failure when the
+        // device confirms the recording is already gone (or force=true).
+        let deviceDeletionResult = { attempted: false, success: false };
         if (episode.cmd_url) {
-          try {
-            deviceDeletionResult = await this.deleteRecordingFromHDHomeRun(episode.cmd_url, rerecord);
-            this.log(`✓ Episode deleted from HDHomeRun device`);
-          } catch (error) {
-            if (await this.isRecordingOnDevice(episode)) {
-              this.log(`✗ Failed to delete from device: ${error.message}`);
-              return res.status(500).json({
-                error: 'Failed to delete recording from HDHomeRun device',
-                details: error.message,
-                deviceDeletion: { success: false, error: error.message }
-              });
+          let onDevice = true;
+          if (episode.device_missing_since) {
+            // Flagged missing by discovery - re-check in case it came back
+            onDevice = await this.verifyOnDevice(episode);
+          }
+
+          if (onDevice) {
+            try {
+              deviceDeletionResult = { attempted: true, ...(await this.deleteRecordingFromHDHomeRun(episode.cmd_url, rerecord)) };
+              this.log(`✓ Episode deleted from HDHomeRun device`);
+            } catch (error) {
+              if (await this.isRecordingOnDevice(episode)) {
+                if (!force) {
+                  this.log(`✗ Failed to delete from device: ${error.message}`);
+                  return res.status(500).json({
+                    error: 'Failed to delete recording from HDHomeRun device',
+                    details: error.message,
+                    hint: 'Retry with ?force=true to remove the local copy anyway',
+                    deviceDeletion: { attempted: true, success: false, error: error.message }
+                  });
+                }
+                this.log(`⚠️  Device deletion failed but force=true, removing local copy only`);
+                deviceDeletionResult = { attempted: true, success: false, forced: true, error: error.message };
+              } else {
+                // Already deleted on the device (e.g. from another client)
+                this.log(`⚠️  Recording no longer on device, removing local copy only`);
+                deviceDeletionResult = { attempted: true, success: true, alreadyDeleted: true };
+              }
             }
-            // Already deleted on the device (e.g. from another client) - clean up locally
-            this.log(`⚠️  Recording no longer on device, removing local copy only`);
-            deviceDeletionResult = { success: true, alreadyDeleted: true };
+          } else {
+            this.log(`⚠️  Recording is not on the device (missing since ${episode.device_missing_since}), removing local copy only`);
+            deviceDeletionResult = { attempted: false, success: true, alreadyDeleted: true };
           }
         } else {
           this.log(`⚠️  Episode has no cmd_url, skipping device deletion`);
         }
 
-        // Step 2: Delete HLS cache directory
-        const hlsCacheDir = path.join(this.hlsManager.cacheDir, String(id));
+        // Step 2: Delete HLS cache (kills any running transcode and drops the job)
+        const hlsCacheDir = this.hlsManager.getStreamDir(id);
         let hlsDeletionResult = { attempted: false, success: false };
 
         if (fs.existsSync(hlsCacheDir)) {
-          try {
-            this.log(`Deleting HLS cache directory: ${hlsCacheDir}`);
-            fs.rmSync(hlsCacheDir, { recursive: true, force: true });
+          this.log(`Deleting HLS cache directory: ${hlsCacheDir}`);
+          await this.hlsManager.deleteTranscode(id);
+          if (fs.existsSync(hlsCacheDir)) {
+            this.log(`✗ Failed to delete HLS cache: directory still exists`);
+            hlsDeletionResult = { attempted: true, success: false, error: 'Directory still exists' };
+          } else {
             hlsDeletionResult = { attempted: true, success: true };
             this.log(`✓ HLS cache deleted`);
-          } catch (error) {
-            this.log(`✗ Failed to delete HLS cache: ${error.message}`);
-            hlsDeletionResult = { attempted: true, success: false, error: error.message };
           }
         } else {
-          this.log(`HLS cache directory does not exist: ${hlsCacheDir}`);
+          this.hlsManager.transcodeJobs.delete(String(id));
+          this.debug(`HLS cache directory does not exist: ${hlsCacheDir}`);
         }
 
         // Step 3: Delete from local database
@@ -558,12 +621,54 @@ class HDHomeRunServer {
             series_title: episode.series_title,
             episode_title: episode.episode_title
           },
-          deviceDeletion: deviceDeletionResult || { attempted: false, success: false },
+          deviceDeletion: deviceDeletionResult,
           hlsDeletion: hlsDeletionResult
         });
       } catch (error) {
         this.log(`Error deleting episode ${req.params.id}: ${error.message}`);
         res.status(500).json({ error: 'Failed to delete episode' });
+      }
+    });
+
+    // HLS cache maintenance view: what's on disk, what's only on disk, what's orphaned
+    this.app.get('/api/cache', async (req, res) => {
+      try {
+        const report = await this.buildCacheReport();
+        res.json(report);
+      } catch (error) {
+        this.log(`Error building cache report: ${error.message}`);
+        res.status(500).json({ error: 'Failed to build cache report' });
+      }
+    });
+
+    // Remove a cache directory. Refuses to remove the only copy of a recording -
+    // that has to go through DELETE /api/episodes/:id so the intent is explicit.
+    this.app.delete('/api/cache/:episodeId', async (req, res) => {
+      try {
+        const { episodeId } = req.params;
+        if (!/^\d+$/.test(episodeId)) {
+          return res.status(400).json({ error: 'Invalid episode id' });
+        }
+
+        const cacheDir = this.hlsManager.getStreamDir(episodeId);
+        if (!fs.existsSync(cacheDir)) {
+          return res.status(404).json({ error: 'No cache for this episode' });
+        }
+
+        const episode = await this.database.getEpisodeById(episodeId);
+        if (episode && episode.device_missing_since) {
+          return res.status(409).json({
+            error: 'This cache is the only copy of a recording that is no longer on the device',
+            hint: `Use DELETE /api/episodes/${episode.id} to delete the recording`
+          });
+        }
+
+        this.log(`Removing cache for episode ${episodeId} (${episode ? 'still on device' : 'orphan, no database record'})`);
+        await this.hlsManager.deleteTranscode(episodeId);
+        res.json({ success: true, episodeId: parseInt(episodeId, 10), orphan: !episode });
+      } catch (error) {
+        this.log(`Error removing cache ${req.params.episodeId}: ${error.message}`);
+        res.status(500).json({ error: 'Failed to remove cache' });
       }
     });
 
@@ -1061,6 +1166,17 @@ class HDHomeRunServer {
 
         this.debug(`HLS playlist requested for episode ${episodeId}: ${episode.title}`);
 
+        const cached = this.hlsManager.getTranscodeStatus(episodeId).state === 'complete';
+        if (cached) {
+          await this.hlsManager.touch(episodeId);
+        } else if (episode.device_missing_since && !(await this.verifyOnDevice(episode))) {
+          // Nothing to transcode from and nothing cached: the recording is gone
+          return res.status(410).json({
+            error: 'Recording is no longer on the HDHomeRun device and there is no local copy',
+            device_missing_since: episode.device_missing_since
+          });
+        }
+
         // Prepare metadata for transcode
         const metadata = {
           showName: episode.series_title,
@@ -1277,23 +1393,22 @@ class HDHomeRunServer {
         const shows = await dvr.getRecordedShows();
         this.log(`Found ${shows.length} series on ${device.FriendlyName}`);
         
-        // Sync to database, pruning recordings deleted outside this server
-        // (only when the device's series list was read successfully)
-        const { prunedEpisodeIds } = await this.database.syncDeviceData(device, shows, {
-          prune: !dvr.recordedShowsError
+        // Sync to database. Recordings that vanished from the device are flagged,
+        // never deleted (only when the device's series list was read successfully,
+        // so a network blip can't flag everything).
+        await this.database.syncDeviceData(device, shows, {
+          reconcile: !dvr.recordedShowsError
         });
-
-        for (const episodeId of prunedEpisodeIds) {
-          try {
-            await this.hlsManager.deleteTranscode(String(episodeId));
-          } catch (error) {
-            this.log(`Failed to remove HLS cache for pruned episode ${episodeId}: ${error.message}`);
-          }
-        }
       }
+
+      // Recordings on storage devices that didn't show up at all (replaced unit,
+      // new DeviceID) are flagged the same way
+      await this.database.markUnseenDevicesMissing(storageDevices.map(d => d.DeviceID));
 
       this.lastDiscovery = new Date().toISOString();
       this.log(`Discovery completed successfully at ${this.lastDiscovery}`);
+
+      await this.maintainHlsCache();
 
       // Register tuners for live TV
       if (this.liveTVEnabled && this.tunerManager) {
@@ -1333,11 +1448,12 @@ class HDHomeRunServer {
         return;
       }
 
-      // Filter to only episodes recorded in the past month (30 days)
+      // Filter to only episodes recorded in the past month (30 days) that the
+      // device still has (there is no source to transcode a missing one from)
       const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
       const recentEpisodes = allEpisodes.filter(episode => {
         // Use start_time for filtering (Unix timestamp in seconds)
-        return episode.start_time >= thirtyDaysAgo;
+        return episode.start_time >= thirtyDaysAgo && !episode.device_missing_since;
       });
 
       this.log(`Found ${allEpisodes.length} total episodes, ${recentEpisodes.length} recorded in the past month`);
@@ -1356,6 +1472,78 @@ class HDHomeRunServer {
       this.log(`Error during bulk caching: ${error.message}`);
     } finally {
       this.isBulkCaching = false;
+    }
+  }
+
+  async buildCacheReport() {
+    const [cacheDirs, missingEpisodes, onDeviceIds] = await Promise.all([
+      this.hlsManager.listCacheDirs(),
+      this.database.getMissingEpisodes(),
+      this.database.getEpisodeIdsOnDevice()
+    ]);
+    const missingById = new Map(missingEpisodes.map(e => [String(e.id), e]));
+
+    const orphans = [];      // cache dir, no database record: unreachable through the API
+    const preserved = [];    // cache dir for a recording the device no longer has: only copy
+    const disposable = [];   // cache dir for a recording still on the device: re-creatable
+    for (const entry of cacheDirs) {
+      const id = parseInt(entry.episodeId, 10);
+      if (missingById.has(entry.episodeId)) {
+        preserved.push({ ...entry, episode: missingById.get(entry.episodeId) });
+      } else if (onDeviceIds.has(id)) {
+        disposable.push(entry);
+      } else {
+        orphans.push(entry);
+      }
+    }
+
+    // Recordings gone from the device with no local copy either: nothing left to play
+    const cachedIds = new Set(cacheDirs.filter(e => e.state === 'complete').map(e => e.episodeId));
+    const lost = missingEpisodes.filter(e => !cachedIds.has(String(e.id)));
+
+    const sum = list => list.reduce((n, e) => n + (e.bytes || 0), 0);
+    return {
+      cacheDir: this.hlsManager.cacheDir,
+      maxAgeDays: this.hlsCacheMaxAgeMs / 86400000,
+      totals: {
+        directories: cacheDirs.length,
+        bytes: sum(cacheDirs),
+        preserved: { count: preserved.length, bytes: sum(preserved) },
+        disposable: { count: disposable.length, bytes: sum(disposable) },
+        orphans: { count: orphans.length, bytes: sum(orphans) },
+        lost: lost.length
+      },
+      preserved,
+      disposable,
+      orphans,
+      lost
+    };
+  }
+
+  async maintainHlsCache() {
+    // Age out re-creatable caches and report anything that needs a human decision
+    try {
+      const onDeviceIds = await this.database.getEpisodeIdsOnDevice();
+      const removed = await this.hlsManager.cleanupDisposable(
+        episodeId => onDeviceIds.has(parseInt(episodeId, 10)),
+        this.hlsCacheMaxAgeMs
+      );
+      if (removed.length > 0) {
+        this.log(`Removed ${removed.length} unplayed cache(s) for recordings still on the device`);
+      }
+
+      const report = await this.buildCacheReport();
+      const gb = bytes => (bytes / 1073741824).toFixed(1);
+      this.log(`HLS cache: ${report.totals.directories} dirs, ${gb(report.totals.bytes)} GB ` +
+        `(${report.totals.preserved.count} only-copy ${gb(report.totals.preserved.bytes)} GB, ` +
+        `${report.totals.disposable.count} re-creatable, ` +
+        `${report.totals.orphans.count} orphan ${gb(report.totals.orphans.bytes)} GB, ` +
+        `${report.totals.lost} recordings lost with no copy)`);
+      if (report.totals.orphans.count > 0) {
+        this.log(`  Orphaned cache dirs (no database record): ${report.orphans.map(o => o.episodeId).join(', ')} - see GET /api/cache`);
+      }
+    } catch (error) {
+      this.log(`HLS cache maintenance failed: ${error.message}`);
     }
   }
 
@@ -1403,6 +1591,7 @@ class HDHomeRunServer {
       this.app.listen(this.port, this.host, () => {
         this.log(`HDHomeRun DVR API server running on http://${this.host}:${this.port}`);
         this.log(`Pre-cache mode: ${this.preCache ? 'ENABLED' : 'DISABLED'}`);
+        this.log(`HLS cache aging: ${this.hlsCacheMaxAgeMs > 0 ? `${this.hlsCacheMaxAgeMs / 86400000} days unplayed (on-device recordings only)` : 'DISABLED'}`);
         if (this.preCache) {
           this.log('  All episodes will be converted to HLS after discovery');
         } else {
@@ -1418,6 +1607,8 @@ class HDHomeRunServer {
         this.log('  GET /api/episodes/:id - Get specific episode');
         this.log('  PUT /api/episodes/:id/progress - Update watch progress');
         this.log('  DELETE /api/episodes/:id - Delete episode');
+        this.log('  GET /api/cache - HLS cache report (only-copy, re-creatable, orphaned)');
+        this.log('  DELETE /api/cache/:episodeId - Remove a re-creatable or orphaned cache');
         this.log('  POST /api/discover - Manual discovery trigger');
         this.log('  GET /api/guide - Program guide (24hr, cached)');
         this.log('  GET /api/guide/search - Search programs');

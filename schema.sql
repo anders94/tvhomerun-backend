@@ -88,11 +88,13 @@ CREATE TABLE episodes (
     file_size INTEGER,                       -- File size in bytes (if available)
     play_url TEXT,                           -- Direct streaming URL
     cmd_url TEXT,                            -- Command/control URL
+    recording_id TEXT,                       -- Device's id for this recording (from CmdURL); one row per recording, reruns of a ProgramID get their own rows
     
     -- Playback information
     resume_position INTEGER DEFAULT 0,      -- Resume position in seconds
     watched BOOLEAN DEFAULT FALSE,          -- Has been fully watched
     record_success INTEGER DEFAULT 1,       -- Recording successful (1) or failed (0)
+    device_missing_since DATETIME,          -- Set when the device stops listing this recording (row kept; local HLS cache may be the only copy)
     
     -- Metadata
     image_url TEXT,                          -- Episode artwork URL
@@ -105,6 +107,7 @@ CREATE TABLE episodes (
 -- Indexes for episode lookups and sorting
 CREATE INDEX idx_episodes_series ON episodes(series_id);
 CREATE INDEX idx_episodes_program_id ON episodes(program_id);
+CREATE INDEX idx_episodes_recording_id ON episodes(recording_id);
 CREATE INDEX idx_episodes_start_time ON episodes(start_time);
 CREATE INDEX idx_episodes_channel ON episodes(channel_name, channel_number);
 CREATE INDEX idx_episodes_watched ON episodes(watched);

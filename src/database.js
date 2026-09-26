@@ -1,6 +1,7 @@
 const db = require('asynqlite');
 const fs = require('fs');
 const path = require('path');
+const HDHomeRunDVR = require('./dvr');
 
 class HDHomeRunDatabase {
   constructor(dbPath = './tvhdhomerun.db') {
@@ -26,6 +27,9 @@ class HDHomeRunDatabase {
       // Ensure triggers exist (for databases created before triggers were added)
       await this.ensureTriggersExist();
     }
+
+    // Add columns introduced after the initial schema
+    await this.ensureEpisodeColumns();
 
     // Check if guide tables exist, if not create them (auto-migration)
     const guideTables = await db.run(`
@@ -128,10 +132,12 @@ class HDHomeRunDatabase {
         file_size INTEGER,
         play_url TEXT,
         cmd_url TEXT,
+        recording_id TEXT,
         resume_position INTEGER DEFAULT 0,
         watched BOOLEAN DEFAULT FALSE,
         record_success INTEGER DEFAULT 1,
         image_url TEXT,
+        device_missing_since DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
@@ -145,6 +151,7 @@ class HDHomeRunDatabase {
     await db.run(`CREATE INDEX idx_series_title ON series(title)`);
     await db.run(`CREATE INDEX idx_episodes_series ON episodes(series_id)`);
     await db.run(`CREATE INDEX idx_episodes_program_id ON episodes(program_id)`);
+    await db.run(`CREATE INDEX idx_episodes_recording_id ON episodes(recording_id)`);
     await db.run(`CREATE INDEX idx_episodes_start_time ON episodes(start_time)`);
 
     // Create triggers to maintain series statistics
@@ -346,11 +353,20 @@ class HDHomeRunDatabase {
   async upsertEpisode(seriesDbId, episodeData) {
     const now = new Date().toISOString();
     
-    // Use ProgramID as unique identifier for episodes
-    const existing = await db.run(
-      'SELECT id FROM episodes WHERE series_id = ? AND program_id = ?',
-      [seriesDbId, episodeData.ProgramID]
-    );
+    // One row per recording on the device. The same program can be recorded more
+    // than once (reruns), so ProgramID is not unique; the id in CmdURL is.
+    const recordingId = HDHomeRunDVR.recordingIdFromUrl(episodeData.CmdURL) ||
+      HDHomeRunDVR.recordingIdFromUrl(episodeData.PlayURL);
+    let existing = recordingId
+      ? await db.run('SELECT id FROM episodes WHERE series_id = ? AND recording_id = ?', [seriesDbId, recordingId])
+      : [];
+    if ((!existing || existing.length === 0) && !recordingId) {
+      // No recording id available at all; fall back to the old program match
+      existing = await db.run(
+        'SELECT id FROM episodes WHERE series_id = ? AND program_id = ? AND recording_id IS NULL',
+        [seriesDbId, episodeData.ProgramID]
+      );
+    }
 
     // Extract season and episode numbers from episode number string
     const seasonEpisode = this.parseEpisodeNumber(episodeData.EpisodeNumber);
@@ -378,9 +394,11 @@ class HDHomeRunDatabase {
           filename = ?,
           play_url = ?,
           cmd_url = ?,
+          recording_id = ?,
           resume_position = ?,
           record_success = ?,
           image_url = ?,
+          device_missing_since = NULL,
           updated_at = ?
         WHERE id = ?
       `, [
@@ -403,6 +421,7 @@ class HDHomeRunDatabase {
         episodeData.Filename,
         episodeData.PlayURL,
         episodeData.CmdURL,
+        recordingId,
         episodeData.Resume === 4294967295 ? 0 : episodeData.Resume,
         episodeData.RecordSuccess || 1,
         episodeData.ImageURL,
@@ -419,9 +438,9 @@ class HDHomeRunDatabase {
           season_number, episode_num, synopsis, category, channel_name,
           channel_number, channel_image_url, start_time, end_time,
           original_airdate, record_start_time, record_end_time, first_airing,
-          filename, play_url, cmd_url, resume_position, record_success,
+          filename, play_url, cmd_url, recording_id, resume_position, record_success,
           image_url, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         seriesDbId,
         episodeData.ProgramID,
@@ -444,6 +463,7 @@ class HDHomeRunDatabase {
         episodeData.Filename,
         episodeData.PlayURL,
         episodeData.CmdURL,
+        recordingId,
         episodeData.Resume === 4294967295 ? 0 : episodeData.Resume,
         episodeData.RecordSuccess || 1,
         episodeData.ImageURL,
@@ -473,14 +493,14 @@ class HDHomeRunDatabase {
     return { season: null, episode: null };
   }
 
-  async syncDeviceData(deviceData, shows, { prune = false } = {}) {
+  async syncDeviceData(deviceData, shows, { reconcile = false } = {}) {
     console.log(`Syncing data for device: ${deviceData.FriendlyName}`);
     
     // Upsert device
     const deviceDbId = await this.upsertDevice(deviceData);
 
-    // Track which series/episodes the device currently has so recordings
-    // deleted outside this server can be pruned from the database
+    // Track what the device currently lists so recordings that vanished can be
+    // flagged (never deleted - the local HLS cache may be the only copy left)
     const seenSeriesIds = new Set();
     const seenEpisodeIds = new Set();
     const incompleteSeriesIds = new Set();
@@ -530,50 +550,100 @@ class HDHomeRunDatabase {
       }
     }
 
-    let prunedEpisodeIds = [];
-    if (prune) {
-      prunedEpisodeIds = await this.pruneMissingContent(
+    let result = { newlyMissing: [], removedSeries: [] };
+    if (reconcile) {
+      result = await this.reconcileDeviceContent(
         deviceDbId, seenSeriesIds, seenEpisodeIds, incompleteSeriesIds
       );
     }
     
     console.log(`Sync completed for device: ${deviceData.FriendlyName}`);
-    return { prunedEpisodeIds };
+    return { deviceDbId, ...result };
   }
 
-  async pruneMissingContent(deviceDbId, seenSeriesIds, seenEpisodeIds, incompleteSeriesIds) {
-    // Remove episodes (and then empty series) that are no longer on the device.
+  async reconcileDeviceContent(deviceDbId, seenSeriesIds, seenEpisodeIds, incompleteSeriesIds) {
+    // Flag episodes the device no longer lists. Rows and any HLS cache are kept:
+    // after a drive failure the cache may be the only copy of a recording.
     // Series whose episode list could not be fetched are left untouched.
+    const now = new Date().toISOString();
     const rows = await db.run(`
-      SELECT e.id, e.series_id, s.title as series_title, e.episode_title
+      SELECT e.id, e.series_id, e.device_missing_since, s.title as series_title, e.episode_title
       FROM episodes e
       JOIN series s ON e.series_id = s.id
       WHERE s.device_id = ?
     `, [deviceDbId]);
 
-    const stale = rows.filter(row =>
-      !incompleteSeriesIds.has(row.series_id) && !seenEpisodeIds.has(row.id)
-    );
-
-    for (const row of stale) {
-      await db.run('DELETE FROM episodes WHERE id = ?', [row.id]);
-      console.log(`Pruned episode ${row.id} no longer on device: ${row.series_title} - ${row.episode_title}`);
+    const newlyMissing = [];
+    for (const row of rows) {
+      if (incompleteSeriesIds.has(row.series_id) || seenEpisodeIds.has(row.id)) continue;
+      if (row.device_missing_since) continue; // already flagged, keep original timestamp
+      await db.run('UPDATE episodes SET device_missing_since = ? WHERE id = ?', [now, row.id]);
+      newlyMissing.push(row);
+      console.log(`Episode ${row.id} no longer on device (keeping local record): ${row.series_title} - ${row.episode_title}`);
     }
 
+    // A series that isn't on the device and has no episodes holds nothing worth keeping
+    const removedSeries = [];
     const series = await db.run('SELECT id, title FROM series WHERE device_id = ?', [deviceDbId]);
     for (const s of series) {
       if (seenSeriesIds.has(s.id)) continue;
       const remaining = await db.run('SELECT COUNT(*) as count FROM episodes WHERE series_id = ?', [s.id]);
       if (remaining[0].count === 0) {
         await db.run('DELETE FROM series WHERE id = ?', [s.id]);
-        console.log(`Pruned series ${s.id} no longer on device: ${s.title}`);
+        removedSeries.push(s);
+        console.log(`Removed empty series ${s.id} no longer on device: ${s.title}`);
       }
     }
 
-    if (stale.length > 0) {
-      console.log(`Pruned ${stale.length} episode(s) no longer on device`);
+    if (newlyMissing.length > 0) {
+      console.log(`${newlyMissing.length} episode(s) newly missing from device`);
     }
-    return stale.map(row => row.id);
+    return { newlyMissing, removedSeries };
+  }
+
+  async markUnseenDevicesMissing(seenDeviceIds) {
+    // Flag every episode belonging to a storage device that discovery did not find
+    // (e.g. the unit was replaced and has a new DeviceID). Non-destructive: the
+    // flag clears as soon as the device shows up again.
+    if (seenDeviceIds.length === 0) return 0;
+    const now = new Date().toISOString();
+    const placeholders = seenDeviceIds.map(() => '?').join(',');
+    const rows = await db.run(`
+      SELECT e.id FROM episodes e
+      JOIN series s ON e.series_id = s.id
+      JOIN devices d ON s.device_id = d.id
+      WHERE d.device_id NOT IN (${placeholders}) AND e.device_missing_since IS NULL
+    `, seenDeviceIds);
+    for (const row of rows) {
+      await db.run('UPDATE episodes SET device_missing_since = ? WHERE id = ?', [now, row.id]);
+    }
+    if (rows.length > 0) {
+      console.log(`${rows.length} episode(s) belong to devices not found in discovery, flagged as missing`);
+    }
+    return rows.length;
+  }
+
+  async clearEpisodeMissing(episodeId) {
+    await db.run('UPDATE episodes SET device_missing_since = NULL WHERE id = ?', [episodeId]);
+  }
+
+  async getMissingEpisodes() {
+    const episodes = await db.run(`
+      SELECT
+        e.id, e.title, e.episode_title, e.episode_number, e.start_time, e.end_time,
+        e.duration, e.device_missing_since, e.created_at,
+        s.id as series_id, s.title as series_title
+      FROM episodes e
+      JOIN series s ON e.series_id = s.id
+      WHERE e.device_missing_since IS NOT NULL
+      ORDER BY e.start_time DESC
+    `);
+    return episodes || [];
+  }
+
+  async getEpisodeIdsOnDevice() {
+    const rows = await db.run('SELECT id FROM episodes WHERE device_missing_since IS NULL');
+    return new Set((rows || []).map(row => row.id));
   }
 
   async getDeviceStats() {
@@ -609,6 +679,7 @@ class HDHomeRunDatabase {
         s.category,
         s.image_url,
         s.episode_count,
+        (SELECT COUNT(*) FROM episodes e WHERE e.series_id = s.id AND e.device_missing_since IS NOT NULL) as missing_episode_count,
         s.total_duration,
         s.first_recorded,
         s.last_recorded,
@@ -634,6 +705,7 @@ class HDHomeRunDatabase {
         s.image_url,
         s.episodes_url,
         s.episode_count,
+        (SELECT COUNT(*) FROM episodes e WHERE e.series_id = s.id AND e.device_missing_since IS NOT NULL) as missing_episode_count,
         s.total_duration,
         s.first_recorded,
         s.last_recorded,
@@ -678,6 +750,7 @@ class HDHomeRunDatabase {
         e.cmd_url,
         COALESCE(e.resume_position, 0) as resume_position,
         COALESCE(e.watched, 0) as watched,
+        e.device_missing_since,
         e.record_success,
         e.image_url,
         e.created_at,
@@ -718,6 +791,7 @@ class HDHomeRunDatabase {
         e.cmd_url,
         COALESCE(e.resume_position, 0) as resume_position,
         COALESCE(e.watched, 0) as watched,
+        e.device_missing_since,
         e.record_success,
         e.image_url,
         e.created_at,
@@ -758,6 +832,7 @@ class HDHomeRunDatabase {
         e.play_url,
         COALESCE(e.resume_position, 0) as resume_position,
         COALESCE(e.watched, 0) as watched,
+        e.device_missing_since,
         e.created_at,
         s.series_id,
         s.title as series_title,
@@ -795,6 +870,7 @@ class HDHomeRunDatabase {
         e.cmd_url,
         COALESCE(e.resume_position, 0) as resume_position,
         COALESCE(e.watched, 0) as watched,
+        e.device_missing_since,
         e.created_at,
         s.series_id,
         s.title as series_title,
@@ -870,6 +946,38 @@ class HDHomeRunDatabase {
 
     // Return the updated episode
     return await this.getEpisodeById(episodeId);
+  }
+
+  async ensureEpisodeColumns() {
+    const columns = await db.run('PRAGMA table_info(episodes)');
+    const names = new Set((columns || []).map(column => column.name));
+    if (!names.has('device_missing_since')) {
+      console.log('Adding episodes.device_missing_since column...');
+      await db.run('ALTER TABLE episodes ADD COLUMN device_missing_since DATETIME');
+    }
+    if (!names.has('recording_id')) {
+      console.log('Adding episodes.recording_id column...');
+      await db.run('ALTER TABLE episodes ADD COLUMN recording_id TEXT');
+      await db.run('CREATE INDEX IF NOT EXISTS idx_episodes_recording_id ON episodes(recording_id)');
+    }
+    await this.backfillRecordingIds();
+  }
+
+  async backfillRecordingIds() {
+    // Rows written before recording_id existed (or restored from an old backup)
+    // get it derived from their cmd_url
+    const rows = await db.run(`SELECT id, cmd_url, play_url FROM episodes WHERE recording_id IS NULL`);
+    let filled = 0;
+    for (const row of rows || []) {
+      const recordingId = HDHomeRunDVR.recordingIdFromUrl(row.cmd_url) || HDHomeRunDVR.recordingIdFromUrl(row.play_url);
+      if (!recordingId) continue;
+      await db.run('UPDATE episodes SET recording_id = ? WHERE id = ?', [recordingId, row.id]);
+      filled++;
+    }
+    if (filled > 0) {
+      console.log(`Backfilled recording_id for ${filled} episode(s)`);
+    }
+    return filled;
   }
 
   async ensureTriggersExist() {
@@ -977,9 +1085,22 @@ class HDHomeRunDatabase {
   async deleteEpisode(episodeId) {
     // Delete an episode from the database
     // Note: Triggers will automatically update series statistics
+    const rows = await db.run('SELECT series_id FROM episodes WHERE id = ?', [episodeId]);
     await db.run(`DELETE FROM episodes WHERE id = ?`, [episodeId]);
     console.log(`Episode ${episodeId} deleted from database`);
-    return true;
+
+    // Drop the series row if that was its last episode; discovery re-adds it
+    // if the device still has other recordings for it
+    let removedSeries = false;
+    if (rows && rows.length > 0) {
+      const remaining = await db.run('SELECT COUNT(*) as count FROM episodes WHERE series_id = ?', [rows[0].series_id]);
+      if (remaining[0].count === 0) {
+        await db.run('DELETE FROM series WHERE id = ?', [rows[0].series_id]);
+        removedSeries = true;
+        console.log(`Series ${rows[0].series_id} removed (no episodes left)`);
+      }
+    }
+    return { removedSeries };
   }
 
   async createGuideSchema() {

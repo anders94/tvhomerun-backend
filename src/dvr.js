@@ -1,6 +1,16 @@
 const axios = require('axios');
 
 class HDHomeRunDVR {
+  /**
+   * The device's own id for a recording, from its CmdURL/PlayURL
+   * (http://ip/recorded/cmd?id=XXXX). Stable across IP changes.
+   */
+  static recordingIdFromUrl(url) {
+    if (!url) return null;
+    const match = String(url).match(/[?&]id=([^&]+)/);
+    return match ? match[1] : null;
+  }
+
   constructor(device) {
     this.device = device;
     this.baseUrl = `http://${device.ip}`;

@@ -3,7 +3,7 @@
 ## Overview
 
 The HLS streaming system now uses **full-file caching** instead of rolling segments. This means:
-- Entire episodes are transcoded once and cached permanently (30 days)
+- Entire episodes are transcoded once and cached; caches are kept for as long as they might be the only copy (see Cache Management)
 - Multiple viewers share the same cached content
 - Seeking/rewinding works instantly
 - Only one FFmpeg process per episode
@@ -108,12 +108,14 @@ Settings in `src/hls-stream.js`:
 ```javascript
 {
   segmentDuration: 4,        // 4 second segments
-  cacheDir: '../hls-cache',  // Cache storage location
-  cleanupInterval: 3600000,  // Check for old cache every hour
-  maxCacheAge: 2592000000,   // Delete cache after 30 days
+  cacheDir: '../hls-cache',  // Cache storage location (override with HLS_CACHE_DIR)
   segmentPattern: '%04d'     // 4-digit naming (supports up to 11 hours)
 }
 ```
+
+Environment variables:
+- `HLS_CACHE_DIR`: cache location (default `hls-cache/` next to `src/`)
+- `HLS_CACHE_MAX_AGE_DAYS`: age out re-creatable caches after this many days unplayed (default 30, `0` disables)
 
 **Content Length Limits:**
 - 3-digit naming (`%03d`): 1,000 segments = 66 minutes max
@@ -122,9 +124,12 @@ Settings in `src/hls-stream.js`:
 ## Cache Management
 
 ### Automatic Cleanup
-- Runs hourly
-- Removes caches older than 30 days
-- Based on directory modification time
+Runs after every discovery. Each cache directory falls into one group:
+- **Only copy** – the recording is no longer on the HDHomeRun (`device_missing_since` set). Never removed automatically; it goes away only when the episode is deleted through the API.
+- **Re-creatable** – the recording is still on the device. Removed after `HLS_CACHE_MAX_AGE_DAYS` without being played (last play is recorded in `transcode.json` as `lastAccessed`).
+- **Orphan** – no database row for the id. Reported in the log and in `GET /api/cache`; never removed automatically.
+
+Incomplete directories (a transcode that failed or was interrupted) are wiped before the transcode is retried, so stale segments never get appended to.
 
 ### Manual Cache Management
 
@@ -139,15 +144,18 @@ ls hls-cache/              # List all cached episodes
 cat hls-cache/3/transcode.json
 ```
 
-**Delete specific cache:**
+**Delete specific cache** (through the API, so the in-memory job state stays consistent):
 ```bash
-rm -rf hls-cache/3/
+curl http://localhost:3000/api/cache            # report: preserved / disposable / orphans / lost
+curl -X DELETE http://localhost:3000/api/cache/3
 ```
+Deleting via the filesystem while the server runs leaves it believing the cache exists; restart afterwards if you must.
 
-**Clear all cache:**
+**Restore recordings whose only copy is a cache directory** (e.g. after a device drive failure and a database rebuild):
 ```bash
-rm -rf hls-cache/*
+node src/restore-cached-episodes.js <backup.db> <old-cache-dir>
 ```
+Re-inserts the episode and series rows from the backup for every cache directory whose id is missing from the live database, flags them as not on the device, and moves the directories into the live cache. Run with the server stopped.
 
 ### Cache on Startup
 

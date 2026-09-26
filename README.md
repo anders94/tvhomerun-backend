@@ -293,6 +293,14 @@ Response:
 
 **Note**: `hls_cache_bytes` shows the disk space in bytes used by the HLS transcoded cache for this episode. Returns 0 if no cache exists. This is calculated directly from the filesystem (equivalent to `du -s hls-cache/{id}`).
 
+Every episode also carries availability fields:
+- `on_device`: the HDHomeRun still lists the recording (`device_missing_since` holds the timestamp when it stopped)
+- `local_copy`: a complete HLS transcode is cached locally
+- `playable`: `on_device || local_copy`; false means the recording is gone everywhere
+- `hls_cache_state`: `complete`, `transcoding`, `error` or `null`
+
+Recordings that disappear from the device (a failed drive, deletion from another client) are never removed locally by discovery. They stay listed with `on_device: false` so a cached copy can still be played, and are removed only via `DELETE /api/episodes/:id`.
+
 #### Update Playback Progress
 ```bash
 curl -X PUT http://localhost:3000/api/episodes/123/progress \
@@ -350,13 +358,36 @@ Response:
 ```
 
 **Deletion Workflow**:
-1. Recording is deleted from HDHomeRun device (fails fast if this fails)
+1. Recording is deleted from HDHomeRun device (fails fast if this fails and the device still has it; if the device reports the recording is already gone, deletion continues locally)
 2. HLS cache directory is removed (`hls-cache/{episodeId}/`)
-3. Episode is removed from local database (triggers update series statistics)
+3. Episode is removed from local database (triggers update series statistics; an emptied series is removed too)
 
 **Query Parameters**:
+- `force=true`: Remove the local copy even if the device can't be reached or refuses the deletion
 - `rerecord=false` (default): Prevents the program from being recorded again
 - `rerecord=true`: Allows the same program to be recorded in future airings
+
+### HLS Cache Maintenance
+
+#### Cache Report
+```bash
+curl http://localhost:3000/api/cache
+```
+
+Groups every `hls-cache/{id}` directory:
+- `preserved`: recording is gone from the device, this cache is the only copy (never aged out)
+- `disposable`: recording is still on the device, cache is re-creatable (aged out after `HLS_CACHE_MAX_AGE_DAYS` unplayed, default 30, `0` disables)
+- `orphans`: no database record for this id (reported, never removed automatically)
+- `lost`: recordings gone from the device with no local copy at all
+
+`totals` carries counts and bytes for each group.
+
+#### Remove a Cache Directory
+```bash
+curl -X DELETE http://localhost:3000/api/cache/123
+```
+
+Removes a `disposable` or `orphan` cache. Refuses (409) if the cache is the only copy of a recording; delete the episode instead.
 
 ### Discovery
 

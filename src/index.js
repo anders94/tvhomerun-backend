@@ -76,7 +76,7 @@ async function main() {
       
       // Sync device and content data to database
       console.log(`Syncing ${shows.length} series to database...`);
-      await database.syncDeviceData(device, shows);
+      await database.syncDeviceData(device, shows, { reconcile: !dvr.recordedShowsError });
       
       if (shows.length === 0) {
         console.log('   No recorded shows found.\n');

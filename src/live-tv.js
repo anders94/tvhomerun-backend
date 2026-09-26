@@ -10,6 +10,8 @@
  * - Device offline handling
  */
 
+const fs = require('fs');
+const path = require('path');
 const db = require('asynqlite');
 const axios = require('axios');
 const LiveStreamManager = require('./live-stream');
@@ -42,10 +44,33 @@ class TunerManager {
     // Load existing tuners from database
     await this.loadTunersFromDatabase();
 
+    // Live streams don't survive a restart, so any leftover segment dirs are junk
+    await this.clearLiveCache();
+
     // Start background tasks
     this.startBackgroundTasks();
 
     console.log(`[LiveTV] Initialized with ${this.tuners.size} tuners`);
+  }
+
+  /**
+   * Remove everything under the live cache directory
+   */
+  async clearLiveCache() {
+    const cacheDir = this.config.cacheDir;
+    try {
+      const entries = await fs.promises.readdir(cacheDir);
+      for (const entry of entries) {
+        await fs.promises.rm(path.join(cacheDir, entry), { recursive: true, force: true });
+      }
+      if (entries.length > 0) {
+        console.log(`[LiveTV] Cleared ${entries.length} stale live cache dir(s)`);
+      }
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.error(`[LiveTV] Failed to clear live cache ${cacheDir}:`, err.message);
+      }
+    }
   }
 
   /**

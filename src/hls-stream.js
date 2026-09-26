@@ -23,8 +23,6 @@ class HLSStreamManager {
     this.verbose = options.verbose || false;
     this.segmentDuration = options.segmentDuration || 4; // 4 second segments
     this.cacheDir = options.cacheDir || path.join(__dirname, '../hls-cache');
-    this.cleanupInterval = options.cleanupInterval || 3600000; // 1 hour
-    this.maxCacheAge = options.maxCacheAge || 2592000000; // 30 days
     this.maxConcurrentTranscodes = options.maxConcurrentTranscodes || 2; // Max concurrent transcodes
 
     // Transcoding jobs: episodeId -> { state, process, startTime, progress, error }
@@ -146,8 +144,14 @@ class HLSStreamManager {
                 state: TRANSCODE_STATE.COMPLETE,
                 startTime: stateData.startTime,
                 endTime: stateData.endTime,
+                lastAccessed: stateData.lastAccessed,
                 progress: 100,
-                outputDir: episodeDir
+                outputDir: episodeDir,
+                metadata: {
+                  showName: stateData.showName,
+                  episodeName: stateData.episodeName,
+                  airDate: stateData.airDate
+                }
               });
               this.debug(`Found cached episode ${entry}`);
             }
@@ -208,6 +212,8 @@ class HLSStreamManager {
    * @returns {Promise<string>} - Path to output directory
    */
   async startTranscode(episodeId, sourceUrl, isBulkConversion = false, metadata = {}) {
+    episodeId = String(episodeId);
+
     // Check if already transcoded
     const existingJob = this.transcodeJobs.get(episodeId);
 
@@ -239,7 +245,9 @@ class HLSStreamManager {
       }
     }
 
-    // Create output directory
+    // Start from a clean directory: leftovers from a failed or abandoned run would
+    // otherwise be appended to (append_list) and corrupt the playlist
+    await this.cleanupStreamDir(outputDir);
     await mkdir(outputDir, { recursive: true });
 
     // Build FFmpeg command for full-file transcoding
@@ -445,7 +453,7 @@ class HLSStreamManager {
    * Check if episode is transcoded or being transcoded
    */
   getTranscodeStatus(episodeId) {
-    const job = this.transcodeJobs.get(episodeId);
+    const job = this.transcodeJobs.get(String(episodeId));
 
     if (!job) {
       return { state: TRANSCODE_STATE.PENDING };
@@ -478,6 +486,7 @@ class HLSStreamManager {
    * Delete transcode cache for an episode
    */
   async deleteTranscode(episodeId) {
+    episodeId = String(episodeId);
     const job = this.transcodeJobs.get(episodeId);
 
     // Kill process if still running
@@ -515,31 +524,106 @@ class HLSStreamManager {
   }
 
   /**
-   * Clean up old transcodes
+   * Record that an episode was played, so cache aging is based on last use
    */
-  async cleanup() {
-    const now = Date.now();
+  async touch(episodeId) {
+    const job = this.transcodeJobs.get(String(episodeId));
+    if (!job || job.state !== TRANSCODE_STATE.COMPLETE) return;
 
-    // Check for very old cached transcodes (30 days default)
+    job.lastAccessed = Date.now();
+    const stateData = await this.loadTranscodeState(episodeId);
+    if (stateData) {
+      await this.saveTranscodeState(episodeId, { ...stateData, lastAccessed: job.lastAccessed });
+    }
+  }
+
+  /**
+   * Total bytes in a directory (non-recursive; stream dirs are flat)
+   */
+  async getDirSize(dirPath) {
+    let total = 0;
     try {
-      const entries = await readdir(this.cacheDir);
-
-      for (const entry of entries) {
-        const entryPath = path.join(this.cacheDir, entry);
-        const stats = await stat(entryPath);
-
-        if (stats.isDirectory()) {
-          const age = now - stats.mtimeMs;
-
-          if (age > this.maxCacheAge) {
-            this.log(`Cleaning up old cache: ${entry} (age: ${Math.round(age / 86400000)} days)`);
-            await this.deleteTranscode(entry);
-          }
-        }
+      for (const file of await readdir(dirPath)) {
+        const stats = await stat(path.join(dirPath, file));
+        if (stats.isFile()) total += stats.size;
       }
     } catch (error) {
-      this.debug(`Cleanup error: ${error.message}`);
+      this.debug(`Error sizing ${dirPath}: ${error.message}`);
     }
+    return total;
+  }
+
+  /**
+   * List every directory in the cache with its on-disk state
+   * @returns {Promise<Array<{episodeId, state, bytes, startTime, endTime, lastAccessed, metadata}>>}
+   */
+  async listCacheDirs() {
+    const results = [];
+    let entries = [];
+    try {
+      entries = await readdir(this.cacheDir);
+    } catch (error) {
+      this.debug(`Error listing cache: ${error.message}`);
+      return results;
+    }
+
+    for (const entry of entries) {
+      const dirPath = path.join(this.cacheDir, entry);
+      try {
+        const stats = await stat(dirPath);
+        if (!stats.isDirectory()) continue;
+      } catch (error) {
+        continue;
+      }
+
+      const stateData = await this.loadTranscodeState(entry) || {};
+      const job = this.transcodeJobs.get(entry);
+      results.push({
+        episodeId: entry,
+        state: job ? job.state : (stateData.state || null),
+        bytes: await this.getDirSize(dirPath),
+        startTime: stateData.startTime || null,
+        endTime: stateData.endTime || null,
+        lastAccessed: (job && job.lastAccessed) || stateData.lastAccessed || null,
+        metadata: {
+          showName: stateData.showName,
+          episodeName: stateData.episodeName,
+          airDate: stateData.airDate
+        }
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Remove completed caches that the caller deems disposable (the source is still
+   * on the device, so they can be re-transcoded) and that haven't been played in
+   * maxAgeMs. Nothing else is touched: caches of recordings that are gone from
+   * the device may be the only copy left.
+   * @param {(episodeId: string) => boolean} isDisposable
+   * @param {number} maxAgeMs - 0 disables aging
+   */
+  async cleanupDisposable(isDisposable, maxAgeMs) {
+    if (!maxAgeMs || maxAgeMs <= 0) return [];
+
+    const now = Date.now();
+    const removed = [];
+    for (const entry of await this.listCacheDirs()) {
+      if (entry.state !== TRANSCODE_STATE.COMPLETE) continue;
+      if (!isDisposable(entry.episodeId)) continue;
+
+      const lastUsed = entry.lastAccessed || entry.endTime || entry.startTime;
+      if (!lastUsed) continue;
+
+      const age = now - lastUsed;
+      if (age > maxAgeMs) {
+        this.log(`Removing unplayed cache for episode ${entry.episodeId} (${Math.round(age / 86400000)} days, still on device)`);
+        await this.deleteTranscode(entry.episodeId);
+        removed.push(entry);
+      }
+    }
+    return removed;
   }
 
   /**

@@ -6,8 +6,9 @@
 *.pcap
 *capture*.txt
 node_modules/
-hls-cache/
-live-cache/
+hls-cache
+live-cache
+*.db.bak
 log/
 env/
 run
